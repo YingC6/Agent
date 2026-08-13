@@ -1,58 +1,114 @@
 # HelloAgents智能旅行助手 🌍✈️
 
-基于HelloAgents框架构建的智能旅行规划助手,集成高德地图MCP服务,提供个性化的旅行计划生成。
+基于 HelloAgents 框架构建的智能旅行规划平台,集成 LangGraph 工作流编排、FAISS 向量 RAG、多智能体协作、高德地图 MCP 服务,提供个性化、可优化的多日旅行计划。
 
 ## ✨ 功能特点
 
-- 🤖 **AI驱动的旅行规划**: 基于HelloAgents框架的SimpleAgent,智能生成详细的多日旅程
-- 🗺️ **高德地图集成**: 通过MCP协议接入高德地图服务,支持景点搜索、路线规划、天气查询
-- 🧠 **智能工具调用**: Agent自动调用高德地图MCP工具,获取实时POI、路线和天气信息
-- 🎨 **现代化前端**: Vue3 + TypeScript + Vite,响应式设计,流畅的用户体验
-- 📱 **完整功能**: 包含住宿、交通、餐饮和景点游览时间推荐
+### 核心能力
+- 🤖 **LangGraph 工作流编排**: 状态机驱动多阶段规划(prepare → research → generate → review → optimize → enrich)
+- 🧠 **FAISS 向量 RAG**: 知识库分块嵌入 + 向量检索 + 规则召回 + LLM 语义重排混合检索
+- 🤝 **多智能体并行协作**: 景点/天气/酒店 Agent 独立实例并行调研,避免线程安全问题
+- 🗺️ **高德地图 MCP 集成**: 通过 MCP 协议接入景点搜索、路线规划、天气查询
+- 🔄 **Planning-Review 双阶段架构**: 规划 Agent 生成后由审核 Agent 检查,不通过自动修正(受最大轮次约束)
+
+### 平台功能
+- 👤 **用户系统**: 注册登录、JWT 认证、角色管理(普通用户/管理员)
+- ❤️ **地点互动**: 收藏、打卡、点评,数据按 poi_id 关联,无需本地存储基础信息
+- 💬 **社区**: 帖子发布(管理员审核)、评论直接发布、热门 POI 推荐
+- 📚 **知识库管理**: Markdown 攻略导入、高评分行程自动转化、低评分自动清理
+- 🎯 **用户偏好管理**: 长期记忆存储,影响行程生成
+- 📝 **旅行清单**: AI 生成 + 手动编辑,按行程关联
+- 💬 **多轮对话优化**: 行程生成后可对话式调整,会话持久化保留上下文
+
+### 工程能力
+- 🚀 **SSE 流式响应**: 行程生成步骤实时推送到前端
+- 🔒 **接口限流**: 同一用户/游客 60 秒内最多 3 次(缓存命中不消耗次数)
+- 💾 **Redis 缓存**: POI 搜索结果(TTL 3600s) + AI 行程结果(TTL 1800s)
+- 🛡️ **ToolGovernance**: 工具调用超时、重试、限流治理
+- 🛣️ **路线增强**: 调用高德路线规划 API 计算真实通勤时长、舒适度评估、备选方案
 
 ## 🏗️ 技术栈
 
 ### 后端
-- **框架**: HelloAgents (基于SimpleAgent)
-- **API**: FastAPI
-- **MCP工具**: amap-mcp-server (高德地图)
-- **LLM**: 支持多种LLM提供商(OpenAI, DeepSeek等)
+- **框架**: FastAPI + HelloAgents (SimpleAgent)
+- **工作流编排**: LangGraph
+- **向量检索**: FAISS + 阿里云 text-embedding-v3
+- **MCP 工具**: amap-mcp-server (高德地图)
+- **数据库**: SQLite (可切换 PostgreSQL)
+- **缓存**: Redis (可选,未启动自动降级)
+- **认证**: JWT + bcrypt
+- **LLM**: 支持 OpenAI 兼容接口(阿里云千问/DeepSeek 等)
 
 ### 前端
 - **框架**: Vue 3 + TypeScript
 - **构建工具**: Vite
-- **UI组件库**: Ant Design Vue
+- **UI 组件库**: Ant Design Vue
+- **状态管理**: Pinia
 - **地图服务**: 高德地图 JavaScript API
-- **HTTP客户端**: Axios
+- **HTTP 客户端**: Axios
 
 ## 📁 项目结构
 
 ```
 helloagents-trip-planner/
-├── backend/                    # 后端服务
+├── backend/                        # 后端服务
 │   ├── app/
-│   │   ├── agents/            # Agent实现
+│   │   ├── agents/                # 多智能体系统
 │   │   │   └── trip_planner_agent.py
-│   │   ├── api/               # FastAPI路由
+│   │   ├── api/
 │   │   │   ├── main.py
+│   │   │   ├── deps.py            # 依赖注入(认证、DB)
 │   │   │   └── routes/
-│   │   │       ├── trip.py
-│   │   │       └── map.py
-│   │   ├── services/          # 服务层
-│   │   │   ├── amap_service.py
-│   │   │   └── llm_service.py
-│   │   ├── models/            # 数据模型
-│   │   │   └── schemas.py
-│   │   └── config.py          # 配置管理
+│   │   │       ├── trip.py        # 行程规划/优化
+│   │   │       ├── trips.py       # 行程记录管理
+│   │   │       ├── conversations.py # 多轮对话
+│   │   │       ├── preferences.py # 用户偏好
+│   │   │       ├── checklists.py  # 旅行清单
+│   │   │       ├── poi.py         # 地点搜索/详情
+│   │   │       ├── map.py         # 地图服务
+│   │   │       ├── community.py   # 社区帖子/评论
+│   │   │       ├── knowledge.py   # 知识库管理
+│   │   │       ├── auth.py        # 认证
+│   │   │       └── logs.py        # 生成日志
+│   │   ├── services/
+│   │   │   ├── agent_workflow.py     # LangGraph 工作流
+│   │   │   ├── vector_store.py       # FAISS 向量存储
+│   │   │   ├── embedding_service.py  # 嵌入服务
+│   │   │   ├── knowledge_service.py  # 知识库混合检索
+│   │   │   ├── tool_governance.py    # 工具治理
+│   │   │   ├── route_service.py      # 路线规划
+│   │   │   ├── plan_diff_service.py  # 行程差异预览
+│   │   │   ├── checklist_service.py  # 清单生成
+│   │   │   ├── memory_service.py     # 长期记忆
+│   │   │   ├── ai_guard_service.py   # 限流/缓存
+│   │   │   ├── ai_trip_service.py    # 行程解析/优化
+│   │   │   ├── trip_repository.py    # 行程持久化
+│   │   │   ├── amap_service.py       # 高德 API 封装
+│   │   │   └── llm_service.py        # LLM 实例管理
+│   │   ├── models/
+│   │   │   ├── schemas.py          # Pydantic 模型
+│   │   │   └── db_models.py        # SQLAlchemy 模型
+│   │   ├── database.py
+│   │   └── config.py
 │   ├── requirements.txt
 │   ├── .env.example
-│   └── .gitignore
-├── frontend/                   # 前端应用
+│   └── run.py
+├── frontend/                       # 前端应用
 │   ├── src/
-│   │   ├── components/        # Vue组件
-│   │   ├── services/          # API服务
-│   │   ├── types/             # TypeScript类型
-│   │   └── views/             # 页面视图
+│   │   ├── views/                 # 页面
+│   │   │   ├── Home.vue           # 首页(行程生成)
+│   │   │   ├── Result.vue         # 行程结果+对话优化
+│   │   │   ├── Discover.vue       # 地点发现
+│   │   │   ├── PlaceDetail.vue    # 地点详情
+│   │   │   ├── Community.vue      # 社区
+│   │   │   ├── Knowledge.vue      # 知识库(管理员)
+│   │   │   ├── Preferences.vue    # 偏好设置
+│   │   │   ├── Trips.vue          # 我的行程
+│   │   │   ├── Login.vue / Register.vue
+│   │   │   └── CommunityAdmin.vue # 社区管理(管理员)
+│   │   ├── services/api.ts
+│   │   ├── stores/                # Pinia 状态
+│   │   └── types/
 │   ├── package.json
 │   └── vite.config.ts
 └── README.md
@@ -64,8 +120,9 @@ helloagents-trip-planner/
 
 - Python 3.10+
 - Node.js 16+
-- 高德地图API密钥 (Web服务API和Web端(JS API))
-- LLM API密钥 (OpenAI/DeepSeek等)
+- 高德地图 API 密钥(**Web 服务 API 类型**,用于后端 MCP 调用)
+- LLM API 密钥(阿里云千问 / DeepSeek / OpenAI 等兼容接口)
+- Redis(可选,未安装自动降级为无缓存模式)
 
 ### 后端安装
 
@@ -74,26 +131,28 @@ helloagents-trip-planner/
 cd backend
 ```
 
-2. 创建虚拟环境
+2. 创建虚拟环境并安装依赖
 ```bash
-python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
-```
-
-3. 安装依赖
-```bash
+conda create -n agent python=3.10
+conda activate agent
 pip install -r requirements.txt
 ```
 
-4. 配置环境变量
+3. 配置环境变量
 ```bash
 cp .env.example .env
-# 编辑.env文件,填入你的API密钥
+# 编辑 .env 文件,填入:
+#   LLM_API_KEY        - LLM 服务密钥
+#   LLM_BASE_URL       - LLM 服务地址
+#   LLM_MODEL_ID       - 模型名称
+#   LLM_TIMEOUT=300    - 行程生成需要较长超时
+#   AMAP_API_KEY       - 高德地图 Web 服务 Key
 ```
 
-5. 启动后端服务
+4. 启动后端服务
 ```bash
-uvicorn app.api.main:app --reload --host 0.0.0.0 --port 8000
+python run.py
+# 或: uvicorn app.api.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 ### 前端安装
@@ -110,8 +169,8 @@ npm install
 
 3. 配置环境变量
 ```bash
-# 创建.env文件, 填入高德地图Web API Key 和 Web端JS API Key
 cp .env.example .env
+# 填入高德地图 Web 端 JS API Key(用于前端地图组件)
 ```
 
 4. 启动开发服务器
@@ -123,77 +182,90 @@ npm run dev
 
 ## 📝 使用指南
 
-1. 在首页填写旅行信息:
-   - 目的地城市
-   - 旅行日期和天数
-   - 交通方式偏好
-   - 住宿偏好
-   - 旅行风格标签
+### 生成旅行计划
 
-2. 点击"生成旅行计划"按钮
+1. 在首页填写旅行信息:目的地、日期、天数、交通、住宿、偏好
+2. 点击"生成旅行计划",系统通过 LangGraph 工作流执行:
+   - **prepare_context**: 初始化需求与知识上下文
+   - **research**: 并行调用景点/天气/酒店 Agent
+   - **generate**: 规划 Agent 生成结构化行程
+   - **review**: 审核 Agent 检查合理性
+   - **optimize**: 不通过则修正(受最大轮次约束)
+   - **enrich**: 补充真实通勤时长、舒适度、备选方案
+3. 查看结果:每日行程、景点地图标记、路线时间轴、天气预报、餐饮推荐
 
-3. 系统将:
-   - 调用HelloAgents Agent生成初步计划
-   - Agent自动调用高德地图MCP工具搜索景点
-   - Agent获取天气信息和路线规划
-   - 整合所有信息生成完整行程
+### 对话式优化
 
-4. 查看结果:
-   - 每日详细行程
-   - 景点信息与地图标记
-   - 交通路线规划
-   - 天气预报
-   - 餐饮推荐
+在结果页点击顶部按钮打开对话窗口,输入修改要求(如"把第二天的颐和园换成长城,预算控制在 800 以内"),AI 会基于当前行程生成优化版本并展示差异。
+
+### 其他功能
+
+- **地点发现**: 搜索 POI、查看详情、收藏/打卡/点评
+- **社区**: 发布旅行帖子、评论交流
+- **知识库**(管理员): 导入 Markdown 攻略、管理知识条目
+- **偏好设置**: 配置长期旅行偏好影响行程生成
+- **旅行清单**: AI 根据行程自动生成清单,可手动编辑
 
 ## 🔧 核心实现
 
-### HelloAgents Agent集成
+### LangGraph 工作流
 
 ```python
-from hello_agents import SimpleAgent, HelloAgentsLLM
-from hello_agents.tools import MCPTool
+from langgraph.graph import StateGraph, START, END
 
-# 创建高德地图MCP工具
-amap_tool = MCPTool(
-    name="amap",
-    server_command=["uvx", "amap-mcp-server"],
-    env={"AMAP_MAPS_API_KEY": "your_api_key"},
-    auto_expand=True
-)
+graph = StateGraph(TravelWorkflowState)
+graph.add_node("prepare_context", _prepare_context)
+graph.add_node("research", _research)
+graph.add_node("generate", _generate)
+graph.add_node("review", _review)
+graph.add_node("optimize", _optimize)
+graph.add_node("enrich", _enrich)
 
-# 创建旅行规划Agent
-agent = SimpleAgent(
-    name="旅行规划助手",
-    llm=HelloAgentsLLM(),
-    system_prompt="你是一个专业的旅行规划助手..."
-)
-
-# 添加工具
-agent.add_tool(amap_tool)
+# 条件路由:审核通过→enrich,未通过→optimize→review(循环受 max_rounds 约束)
+graph.add_conditional_edges("review", _route_after_review, {...})
+graph.compile()
 ```
 
-### MCP工具调用
+### FAISS 向量 RAG 混合检索
 
-Agent可以自动调用以下高德地图MCP工具:
-- `maps_text_search`: 搜索景点POI
-- `maps_weather`: 查询天气
-- `maps_direction_walking_by_address`: 步行路线规划
-- `maps_direction_driving_by_address`: 驾车路线规划
-- `maps_direction_transit_integrated_by_address`: 公共交通路线规划
+```python
+# 1. 规则评分召回 top-8(城市/天数/主题/关键词匹配)
+# 2. FAISS 向量检索补充语义相似分块
+# 3. LLM 语义重排选出 top-3
+vector_store.build_index(knowledge_items)  # 分块+嵌入+L2归一化+IndexFlatIP
+results = vector_store.search(query, top_k=8)  # 内积=余弦相似度
+```
 
-## 📄 API文档
+### 多智能体并行调研
 
-启动后端服务后,访问 `http://localhost:8000/docs` 查看完整的API文档。
+```python
+# 景点/天气/酒店 Agent 使用独立 MCPTool 实例,避免线程安全问题
+with ThreadPoolExecutor(max_workers=3) as executor:
+    futures = {
+        executor.submit(governance.run_agent, tool_name, agent, query): key
+        for key, (name, agent, query, _) in tasks.items()
+    }
+```
+
+## 📄 API 文档
+
+启动后端后访问 `http://localhost:8000/docs` 查看完整 API 文档。
 
 主要端点:
 - `POST /api/trip/plan` - 生成旅行计划
-- `GET /api/map/poi` - 搜索POI
-- `GET /api/map/weather` - 查询天气
-- `POST /api/map/route` - 规划路线
+- `GET /api/trip/plan/stream` - SSE 流式生成
+- `POST /api/trip/optimize` - 优化行程(返回差异预览)
+- `POST /api/conversations` - 创建/恢复对话会话
+- `POST /api/conversations/{id}/messages` - 发送对话消息
+- `GET /api/preferences` - 用户偏好管理
+- `POST /api/trips/{id}/checklist` - 旅行清单
+- `GET /api/poi/search` - 地点搜索
+- `GET /api/community/posts` - 社区帖子
+- `GET /api/knowledge/items` - 知识库(管理员)
 
 ## 🤝 贡献指南
 
-欢迎提交Pull Request或Issue!
+欢迎提交 Pull Request 或 Issue!
 
 ## 📜 开源协议
 
@@ -202,11 +274,12 @@ CC BY-NC-SA 4.0
 ## 🙏 致谢
 
 - [HelloAgents](https://github.com/datawhalechina/Hello-Agents) - 智能体教程
-- [HelloAgents框架](https://github.com/jjyaoao/HelloAgents) - 智能体框架
+- [HelloAgents 框架](https://github.com/jjyaoao/HelloAgents) - 智能体框架
+- [LangGraph](https://github.com/langchain-ai/langgraph) - 工作流编排
+- [FAISS](https://github.com/facebookresearch/faiss) - 向量检索
 - [高德地图开放平台](https://lbs.amap.com/) - 地图服务
-- [amap-mcp-server](https://github.com/sugarforever/amap-mcp-server) - 高德地图MCP服务器
+- [amap-mcp-server](https://github.com/sugarforever/amap-mcp-server) - 高德地图 MCP 服务器
 
 ---
 
-**HelloAgents智能旅行助手** - 让旅行计划变得简单而智能 🌈
-
+**HelloAgents 智能旅行助手** - 让旅行计划变得简单而智能 🌈
