@@ -18,6 +18,7 @@
               <h3>{{ poi.name }}</h3>
               <p class="address">{{ poi.city }} {{ poi.address }}</p>
               <span v-if="poi.tel" class="tel">电话：{{ poi.tel }}</span>
+              <a-button class="add-trip-button" type="primary" block @click.stop="addToTrip(poi)">加入待规划地点</a-button>
             </a-card>
           </a-col>
         </a-row>
@@ -32,9 +33,11 @@ import { ref } from 'vue'
 import { message } from 'ant-design-vue'
 import { useRouter } from 'vue-router'
 import { getPoiPhoto, searchCommunityPois } from '@/services/api'
+import { useTripStore } from '@/stores/trip'
 import type { CommunityPoi } from '@/types'
 
 const router = useRouter()
+const tripStore = useTripStore()
 const loading = ref(false)
 const keyword = ref('')
 const city = ref('')
@@ -48,9 +51,13 @@ const loadPois = async () => {
     pois.value = await Promise.all(results.map(async (poi) => ({ ...poi, photo_url: await getPoiPhoto(poi.name) })))
   } catch (error: any) { message.error(error.response?.data?.detail || '搜索地点失败') } finally { loading.value = false }
 }
+const addToTrip = (poi: CommunityPoi) => {
+  tripStore.addPendingPoi(poi)
+  message.success(`已将“${poi.name}”加入待规划地点`)
+}
 const resetFilters = () => { keyword.value = ''; city.value = ''; pois.value = [] }
 </script>
 
 <style scoped>
-.discover-page { min-height: calc(100vh - 112px); padding: 32px; background: linear-gradient(135deg, #f5f7fa 0%, #e8eefc 100%); }.discover-card { max-width: 1200px; margin: 0 auto; border-radius: 18px; box-shadow: 0 20px 60px rgba(15, 23, 42, .08); }.title { font-size: 22px; font-weight: 700; }.subtitle, .address, .tel { color: #64748b; }.filters { margin: 12px 0 24px; }.place-card { height: 100%; border-radius: 14px; }.cover { height: 130px; margin: -24px -24px 16px; display: flex; justify-content: center; align-items: center; overflow: hidden; background: linear-gradient(135deg, #dbeafe, #e0e7ff); font-size: 42px; }.cover img { width: 100%; height: 100%; object-fit: cover; }.place-card h3 { margin: 12px 0 8px; }.address { min-height: 42px; margin: 0 0 8px; }.tel { font-size: 13px; } @media (max-width: 576px) { .discover-page { padding: 16px; } }
+.add-trip-button { margin-top: 14px; }.discover-page { min-height: calc(100vh - 112px); padding: 32px; background: linear-gradient(135deg, #f5f7fa 0%, #e8eefc 100%); }.discover-card { max-width: 1200px; margin: 0 auto; border-radius: 18px; box-shadow: 0 20px 60px rgba(15, 23, 42, .08); }.title { font-size: 22px; font-weight: 700; }.subtitle, .address, .tel { color: #64748b; }.filters { margin: 12px 0 24px; }.place-card { height: 100%; border-radius: 14px; }.cover { height: 130px; margin: -24px -24px 16px; display: flex; justify-content: center; align-items: center; overflow: hidden; background: linear-gradient(135deg, #dbeafe, #e0e7ff); font-size: 42px; }.cover img { width: 100%; height: 100%; object-fit: cover; }.place-card h3 { margin: 12px 0 8px; }.address { min-height: 42px; margin: 0 0 8px; }.tel { font-size: 13px; } @media (max-width: 576px) { .discover-page { padding: 16px; } }
 </style>

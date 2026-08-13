@@ -33,6 +33,16 @@ psycopg2-binary>=2.9.9
 fastmcp>=2.0.0
 uv>=0.8.0
 
+# Agent工作流与工具协议
+langchain>=1.2,<2
+langchain-core>=1.2,<2
+langgraph>=1.0,<2
+langchain-text-splitters>=1.1,<2
+
+# 向量检索(RAG)
+faiss-cpu>=1.7.4
+numpy>=1.24.0
+
 # 其他工具
 python-dateutil>=2.8.2
 huggingface_hub>=0.25.0

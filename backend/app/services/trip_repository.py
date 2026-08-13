@@ -76,7 +76,7 @@ def conversation_message_to_dict(message: ConversationMessage) -> dict[str, Any]
 
 
 def conversation_to_dict(conversation: Conversation, include_messages: bool = True) -> dict[str, Any]:
-    data = {"id": conversation.id, "trip_id": conversation.trip_id, "current_version_id": conversation.current_version_id, "title": conversation.title, "versions": [version_to_dict(version) for version in conversation.trip.versions] if conversation.trip else [], "created_at": conversation.created_at.isoformat(), "updated_at": conversation.updated_at.isoformat()}
+    data = {"id": conversation.id, "trip_id": conversation.trip_id, "current_version_id": conversation.current_version_id, "title": conversation.title, "summary": conversation.summary or "", "summarized_message_count": conversation.summarized_message_count or 0, "versions": [version_to_dict(version) for version in conversation.trip.versions] if conversation.trip else [], "created_at": conversation.created_at.isoformat(), "updated_at": conversation.updated_at.isoformat()}
     if include_messages:
         data["messages"] = [conversation_message_to_dict(message) for message in conversation.messages]
     return data

@@ -16,6 +16,17 @@
       <p class="page-subtitle">基于AI的个性化旅行规划,让每一次出行都完美无忧</p>
     </div>
 
+    <div class="quick-prompts">
+      <span>试试这样说：</span>
+      <a-tag v-for="prompt in quickPrompts" :key="prompt" class="prompt-tag" @click="applyQuickPrompt(prompt)">{{ prompt }}</a-tag>
+    </div>
+
+    <div v-if="tripStore.pendingPois.length" class="selected-pois">
+      <div class="selected-pois-title">已加入待规划地点</div>
+      <a-tag v-for="poi in tripStore.pendingPois" :key="poi.poi_id" closable @close="tripStore.removePendingPoi(poi.poi_id)">{{ poi.name }}</a-tag>
+      <span class="selected-pois-hint">生成时会将这些地点作为优先参考。</span>
+    </div>
+
     <a-card class="form-card" :bordered="false">
       <a-form
         :model="formData"
@@ -226,6 +237,11 @@ const tripStore = useTripStore()
 const loading = ref(false)
 const loadingProgress = ref(0)
 const loadingStatus = ref('')
+const quickPrompts = [
+  '北京三日历史文化游，预算3000元',
+  '带父母去杭州两天，节奏慢一点',
+  '成都四日美食游，不吃辣'
+]
 
 type TripFormState = Omit<TripFormData, 'start_date' | 'end_date'> & {
   start_date: Dayjs | null
@@ -267,8 +283,15 @@ const buildRequestData = (): TripFormData => ({
   transportation: formData.transportation,
   accommodation: formData.accommodation,
   preferences: formData.preferences,
-  free_text_input: formData.free_text_input
+  free_text_input: [
+    formData.free_text_input,
+    tripStore.pendingPois.length ? `用户指定优先安排的地点：${tripStore.pendingPois.map(item => item.name).join('、')}` : ''
+  ].filter(Boolean).join('\n')
 })
+
+const applyQuickPrompt = (prompt: string) => {
+  formData.free_text_input = prompt
+}
 
 const applyParsedText = async () => {
   if (!formData.free_text_input.trim() || formData.city || formData.start_date || formData.end_date) return
@@ -351,6 +374,49 @@ const handleSubmit = async () => {
 </script>
 
 <style scoped>
+.quick-prompts {
+  position: relative;
+  z-index: 1;
+  max-width: 1050px;
+  margin: 0 auto 18px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  color: rgba(255, 255, 255, .9);
+}
+
+.prompt-tag {
+  cursor: pointer;
+  padding: 5px 10px;
+  border-radius: 999px;
+  color: #1e3a8a;
+  background: rgba(255, 255, 255, .92);
+}
+
+.selected-pois {
+  position: relative;
+  z-index: 1;
+  max-width: 1050px;
+  margin: 0 auto 18px;
+  padding: 14px 18px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, .96);
+  box-shadow: 0 10px 30px rgba(30, 58, 138, .16);
+}
+
+.selected-pois-title {
+  margin-bottom: 8px;
+  font-weight: 600;
+  color: #1e3a8a;
+}
+
+.selected-pois-hint {
+  margin-left: 8px;
+  color: #64748b;
+  font-size: 13px;
+}
+
 .home-container {
   min-height: 100vh;
   background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);

@@ -7,6 +7,7 @@
           <a-menu-item key="Home" @click="router.push('/')">创建行程</a-menu-item>
           <a-menu-item key="Trips" @click="router.push('/trips')">我的行程</a-menu-item>
           <a-menu-item key="Discover" @click="router.push('/discover')">发现地点</a-menu-item>
+          <a-menu-item key="Preferences" @click="router.push('/preferences')">我的偏好</a-menu-item>
         </template>
         <a-menu-item key="Community" @click="router.push('/community')">旅行社区</a-menu-item>
         <a-menu-item v-if="auth.user?.role === 'admin'" key="CommunityAdmin" @click="router.push('/community/admin')">社区管理</a-menu-item>

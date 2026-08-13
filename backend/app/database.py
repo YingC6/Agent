@@ -92,3 +92,15 @@ def sync_conversation_schema():
         for name, definition in additions.items():
             if name not in columns:
                 conn.execute(text(f"ALTER TABLE conversation_messages ADD COLUMN {name} {definition}"))
+
+    # conversations 表添加对话摘要字段
+    if "conversations" in inspector.get_table_names():
+        conv_columns = {column["name"] for column in inspector.get_columns("conversations")}
+        conv_additions = {
+            "summary": "TEXT NOT NULL DEFAULT ''",
+            "summarized_message_count": "INTEGER NOT NULL DEFAULT 0",
+        }
+        with engine.begin() as conn:
+            for name, definition in conv_additions.items():
+                if name not in conv_columns:
+                    conn.execute(text(f"ALTER TABLE conversations ADD COLUMN {name} {definition}"))

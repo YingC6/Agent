@@ -130,6 +130,31 @@ class AmapService:
             arguments["destination_city"] = destination_city
         return self._call(tool_name, arguments)
 
+    def parse_route_summary(self, payload: Any, route_type: str = "walking") -> Dict[str, Any]:
+        """从高德路线规划响应中提取距离与时长摘要。
+
+        Returns:
+            {"distance_meters": float, "duration_seconds": int, "route_type": str}
+            解析失败时返回零值摘要,避免阻塞主流程。
+        """
+        summary = {"distance_meters": 0.0, "duration_seconds": 0, "route_type": route_type}
+        if not isinstance(payload, dict):
+            return summary
+        route_node = payload.get("route") or {}
+        if route_type == "transit":
+            transits = route_node.get("transits") or []
+            if transits and isinstance(transits, list):
+                first = transits[0] if isinstance(transits[0], dict) else {}
+                summary["distance_meters"] = float(first.get("distance") or 0)
+                summary["duration_seconds"] = int(float(first.get("duration") or 0))
+        else:
+            paths = route_node.get("paths") or []
+            if paths and isinstance(paths, list):
+                first = paths[0] if isinstance(paths[0], dict) else {}
+                summary["distance_meters"] = float(first.get("distance") or 0)
+                summary["duration_seconds"] = int(float(first.get("duration") or 0))
+        return summary
+
     def geocode(self, address: str, city: Optional[str] = None) -> Optional[Location]:
         arguments = {"address": address}
         if city:

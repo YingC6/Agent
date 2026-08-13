@@ -20,6 +20,7 @@ class User(Base):
     logs: Mapped[list["GenerationLog"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     ratings: Mapped[list["TripRating"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     conversations: Mapped[list["Conversation"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    memories: Mapped[list["UserMemory"]] = relationship(back_populates="user", cascade="all, delete-orphan")
 
 
 class TripRecord(Base):
@@ -41,6 +42,7 @@ class TripRecord(Base):
     ratings: Mapped[list["TripRating"]] = relationship(back_populates="trip", cascade="all, delete-orphan")
     versions: Mapped[list["TripVersion"]] = relationship(back_populates="trip", cascade="all, delete-orphan", order_by="TripVersion.version_number")
     conversations: Mapped[list["Conversation"]] = relationship(back_populates="trip", cascade="all, delete-orphan")
+    checklists: Mapped[list["TripChecklist"]] = relationship(back_populates="trip", cascade="all, delete-orphan")
 
 
 class TripVersion(Base):
@@ -64,12 +66,29 @@ class Conversation(Base):
     trip_id: Mapped[int | None] = mapped_column(ForeignKey("trip_records.id"), nullable=True, index=True)
     current_version_id: Mapped[int | None] = mapped_column(ForeignKey("trip_versions.id"), nullable=True)
     title: Mapped[str] = mapped_column(String(160), default="旅行计划对话")
+    summary: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    summarized_message_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     user: Mapped[User] = relationship(back_populates="conversations")
     trip: Mapped[TripRecord | None] = relationship(back_populates="conversations", foreign_keys=[trip_id])
     messages: Mapped[list["ConversationMessage"]] = relationship(back_populates="conversation", cascade="all, delete-orphan", order_by="ConversationMessage.created_at")
+
+
+class UserMemory(Base):
+    __tablename__ = "user_memories"
+    __table_args__ = (UniqueConstraint("user_id", "memory_type", "content", name="uq_user_memory"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    memory_type: Mapped[str] = mapped_column(String(40), default="preference", nullable=False, index=True)
+    content: Mapped[str] = mapped_column(String(500), nullable=False)
+    importance: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user: Mapped[User] = relationship(back_populates="memories")
 
 
 class ConversationMessage(Base):
@@ -207,3 +226,23 @@ class PostComment(Base):
     status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class TripChecklist(Base):
+    """出行清单条目
+
+    每个条目关联一个行程记录,支持分类(证件/衣物/电子/药品/其他)、
+    勾选状态和自定义内容。AI 可根据行程信息自动生成初始清单。
+    """
+    __tablename__ = "trip_checklists"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    trip_id: Mapped[int] = mapped_column(ForeignKey("trip_records.id"), nullable=False, index=True)
+    category: Mapped[str] = mapped_column(String(40), default="其他", nullable=False, index=True)
+    content: Mapped[str] = mapped_column(String(200), nullable=False)
+    is_checked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    trip: Mapped[TripRecord] = relationship(back_populates="checklists")

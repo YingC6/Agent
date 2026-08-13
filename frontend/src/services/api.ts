@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { AuthResponse, Conversation, ConversationReply, CommunityPoi, CommunityPost, CommunityStats, KnowledgeItem, ModerationComment, ModerationPost, PageResult, PoiActionResponse, PoiDetail, PoiInteractionSummary, TripFormData, TripPlan, TripPlanResponse, TripRating, TripRecord, UserInfo } from '@/types'
+import type { AuthResponse, Conversation, ConversationReply, CommunityPoi, CommunityPost, CommunityStats, KnowledgeItem, ModerationComment, ModerationPost, PageResult, PoiActionResponse, PoiDetail, PoiInteractionSummary, TripFormData, TripPlan, TripPlanResponse, TripRating, TripRecord, UserInfo, UserPreference, PreferenceType, ChecklistItem, ChecklistResult, ChecklistCategory, OptimizeResult } from '@/types'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
 
@@ -13,7 +13,7 @@ export async function getMe(): Promise<UserInfo> { return (await apiClient.get<U
 export async function parseTripText(text: string): Promise<TripFormData> { return (await apiClient.post<{ success: boolean; data: TripFormData }>('/api/trip/parse', { text })).data.data }
 export async function generateTripPlan(formData: TripFormData): Promise<TripPlanResponse> { return (await apiClient.post<TripPlanResponse>('/api/trip/plan', formData)).data }
 export function createTripStreamUrl(formData: TripFormData): string { const params = new URLSearchParams({ city: formData.city, start_date: formData.start_date, end_date: formData.end_date, travel_days: String(formData.travel_days), transportation: formData.transportation, accommodation: formData.accommodation, preferences: formData.preferences.join(','), free_text_input: formData.free_text_input || '' }); const token = localStorage.getItem('token'); if (token) params.set('token', token); return `${API_BASE_URL}/api/trip/plan/stream?${params.toString()}` }
-export async function optimizeTrip(plan: TripPlan, instruction: string): Promise<TripPlan> { return (await apiClient.post<{ success: boolean; data: { plan: TripPlan } }>('/api/trip/optimize', { plan, instruction })).data.data.plan }
+export async function optimizeTrip(plan: TripPlan, instruction: string): Promise<OptimizeResult> { return (await apiClient.post<{ success: boolean; data: OptimizeResult }>('/api/trip/optimize', { plan, instruction })).data.data }
 export async function listTrips(params: { keyword?: string; page?: number; page_size?: number }): Promise<PageResult<TripRecord>> { return (await apiClient.get<{ success: boolean; data: PageResult<TripRecord> }>('/api/trips', { params })).data.data }
 export async function getTrip(id: number): Promise<TripRecord> { return (await apiClient.get<{ success: boolean; data: TripRecord }>(`/api/trips/${id}`)).data.data }
 export async function rateTrip(id: number, data: { rating: number; comment: string }): Promise<TripRating> { return (await apiClient.post<{ success: boolean; data: TripRating }>(`/api/trips/${id}/rating`, data)).data.data }
@@ -41,4 +41,19 @@ export async function listPendingComments(params: { page?: number; page_size?: n
 export async function moderatePost(id: number, status: 'approved' | 'rejected'): Promise<void> { await apiClient.patch(`/api/community/admin/moderation/posts/${id}`, { status }) }
 export async function moderateComment(id: number, status: 'approved' | 'rejected'): Promise<void> { await apiClient.patch(`/api/community/admin/moderation/comments/${id}`, { status }) }
 export async function healthCheck(): Promise<unknown> { return (await apiClient.get('/health')).data }
+
+// ===== 用户偏好记忆 =====
+export async function listPreferences(): Promise<UserPreference[]> { return (await apiClient.get<{ success: boolean; data: UserPreference[] }>('/api/preferences')).data.data }
+export async function getPreferenceContext(): Promise<string> { return (await apiClient.get<{ success: boolean; data: { context: string } }>('/api/preferences/context')).data.data.context }
+export async function createPreference(data: { memory_type: PreferenceType; content: string; importance: number }): Promise<UserPreference> { return (await apiClient.post<{ success: boolean; data: UserPreference }>('/api/preferences', data)).data.data }
+export async function updatePreference(id: number, data: { content?: string; importance?: number }): Promise<UserPreference> { return (await apiClient.put<{ success: boolean; data: UserPreference }>(`/api/preferences/${id}`, data)).data.data }
+export async function deletePreference(id: number): Promise<void> { await apiClient.delete(`/api/preferences/${id}`) }
+
+// ===== 出行清单 =====
+export async function getChecklist(tripId: number): Promise<ChecklistResult> { return (await apiClient.get<{ success: boolean; data: ChecklistResult }>(`/api/trips/${tripId}/checklist`)).data.data }
+export async function addChecklistItem(tripId: number, data: { category: ChecklistCategory | string; content: string; sort_order?: number }): Promise<ChecklistItem> { return (await apiClient.post<{ success: boolean; data: ChecklistItem }>(`/api/trips/${tripId}/checklist`, data)).data.data }
+export async function generateChecklist(tripId: number): Promise<ChecklistItem[]> { return (await apiClient.post<{ success: boolean; data: ChecklistItem[] }>(`/api/trips/${tripId}/checklist/generate`)).data.data }
+export async function updateChecklistItem(itemId: number, data: { content?: string; is_checked?: boolean; category?: ChecklistCategory | string }): Promise<ChecklistItem> { return (await apiClient.put<{ success: boolean; data: ChecklistItem }>(`/api/checklist/${itemId}`, data)).data.data }
+export async function deleteChecklistItem(itemId: number): Promise<void> { await apiClient.delete(`/api/checklist/${itemId}`) }
+
 export default apiClient

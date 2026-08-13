@@ -9,6 +9,9 @@
         <a-button v-if="!editMode" @click="showOptimize = true" type="primary">
           AI 优化
         </a-button>
+        <a-button v-if="!editMode" @click="showConversation = true" type="default">
+          AI 对话
+        </a-button>
         <a-button v-if="!editMode" @click="toggleEditMode" type="default">
           ✏️ 编辑行程
         </a-button>
@@ -38,51 +41,24 @@
       </a-space>
     </div>
 
-    <div v-if="tripPlan" class="conversation-layout">
-      <aside class="conversation-panel">
-        <a-card title="行程对话" :bordered="false">
-          <a-select v-if="versions.length" v-model:value="selectedVersionId" class="version-select" @change="applyVersion">
-            <a-select-option v-for="version in versions" :key="version.id" :value="version.id">版本 {{ version.version_number }} · {{ version.source }}</a-select-option>
-          </a-select>
-          <div class="message-list">
-            <div v-for="item in conversation?.messages || []" :key="item.id" :class="['chat-message', item.role]">
-              <div>{{ item.content }}</div>
-              <small v-if="item.task_status === 'failed'">处理失败</small>
-            </div>
-          </div>
-          <a-textarea v-model:value="chatInput" :rows="4" :disabled="chatLoading || !tripId" placeholder="例如：第二天增加博物馆，预算控制在 2000 元内" @pressEnter="handleChatEnter" />
-          <a-button block type="primary" :loading="chatLoading" :disabled="!tripId" @click="sendChatMessage">发送</a-button>
-          <div v-if="!tripId" class="chat-hint">请从“我的行程”打开已保存行程后使用多轮对话。</div>
-        </a-card>
-      </aside>
+    <div v-if="tripPlan" class="result-layout">
       <div class="content-wrapper">
-      <!-- 侧边导航 -->
-      <div class="side-nav">
-        <a-affix :offset-top="80">
-          <a-menu mode="inline" :selected-keys="[activeSection]" @click="scrollToSection">
-            <a-menu-item key="overview">
-              <span>📋 行程概览</span>
-            </a-menu-item>
-            <a-menu-item key="budget" v-if="tripPlan.budget">
-              <span>💰 预算明细</span>
-            </a-menu-item>
-            <a-menu-item key="map">
-              <span>📍 景点地图</span>
-            </a-menu-item>
-            <a-sub-menu key="days" title="📅 每日行程">
-              <a-menu-item v-for="(day, index) in tripPlan.days" :key="`day-${index}`">
-                第{{ day.day_index + 1 }}天
-              </a-menu-item>
-            </a-sub-menu>
-            <a-menu-item key="weather" v-if="tripPlan.weather_info && tripPlan.weather_info.length > 0">
-              <span>🌤️ 天气信息</span>
-            </a-menu-item>
-          </a-menu>
-        </a-affix>
-      </div>
+        <div class="side-nav">
+          <a-affix :offset-top="80">
+            <a-menu mode="inline" :selected-keys="[activeSection]" @click="scrollToSection">
+              <a-menu-item key="overview"><span>📋 行程概览</span></a-menu-item>
+              <a-menu-item key="budget" v-if="tripPlan.budget"><span>💰 预算明细</span></a-menu-item>
+              <a-menu-item key="map"><span>📍 景点地图</span></a-menu-item>
+              <a-sub-menu key="days" title="📅 每日行程">
+                <a-menu-item v-for="(day, index) in tripPlan.days" :key="`day-${index}`">第{{ day.day_index + 1 }}天</a-menu-item>
+              </a-sub-menu>
+              <a-menu-item key="checklist" v-if="tripId"><span>🧳 出行清单</span></a-menu-item>
+              <a-menu-item key="weather" v-if="tripPlan.weather_info && tripPlan.weather_info.length > 0"><span>🌤️ 天气信息</span></a-menu-item>
+            </a-menu>
+          </a-affix>
+        </div>
 
-      <!-- 主内容区 -->
-      <div class="main-content">
+        <div class="main-content">
         <!-- 顶部信息区:左侧概览+预算,右侧地图 -->
         <div class="top-info-section">
           <!-- 左侧:行程概览和预算明细 -->
@@ -148,6 +124,8 @@
                 <div class="day-header">
                   <span class="day-title">第{{ day.day_index + 1 }}天</span>
                   <span class="day-date">{{ day.date }}</span>
+                  <a-tag v-if="day.comfort_level" color="blue">{{ day.comfort_level }}</a-tag>
+                  <a-tag v-if="day.estimated_transit_minutes" color="cyan">通勤约 {{ day.estimated_transit_minutes }} 分钟</a-tag>
                 </div>
               </template>
 
@@ -166,6 +144,14 @@
                   <span class="value">{{ day.accommodation }}</span>
                 </div>
               </div>
+
+              <a-alert v-if="day.plan_b" class="plan-b-alert" type="info" show-icon :message="`备选方案：${day.plan_b}`" />
+
+              <a-timeline v-if="day.route_segments?.length" class="route-timeline">
+                <a-timeline-item v-for="segment in day.route_segments" :key="`${segment.origin}-${segment.destination}`">
+                  {{ segment.origin }} → {{ segment.destination }} · {{ segment.route_type }} · {{ segment.distance_km }} km · 约 {{ segment.duration_minutes }} 分钟
+                </a-timeline-item>
+              </a-timeline>
 
               <!-- 景点安排 -->
               <a-divider orientation="left">🎯 景点安排</a-divider>
@@ -274,6 +260,70 @@
           </a-collapse>
         </a-card>
 
+        <!-- 出行清单 -->
+        <a-card id="checklist" v-if="tripId" title="🧳 出行清单" :bordered="false" class="checklist-card">
+          <template #extra>
+            <a-space>
+              <a-button type="primary" size="small" :loading="generatingChecklist" @click="handleGenerateChecklist">
+                ✨ AI 生成
+              </a-button>
+              <a-button size="small" @click="showAddChecklist = true">
+                ➕ 添加条目
+              </a-button>
+            </a-space>
+          </template>
+          <div v-if="checklistLoading" class="checklist-loading">
+            <a-spin tip="加载清单中..." />
+          </div>
+          <div v-else-if="checklistResult">
+            <a-progress
+              :percent="checklistResult!.total ? Math.round(checklistResult!.checked_count / checklistResult!.total * 100) : 0"
+              :format="() => `${checklistResult!.checked_count}/${checklistResult!.total}`"
+              class="checklist-progress"
+            />
+            <a-empty v-if="!checklistResult!.total" description="清单为空,点击 AI 生成或手动添加">
+              <template #image><div style="font-size: 48px;">🧳</div></template>
+            </a-empty>
+            <div v-else class="checklist-groups">
+              <div v-for="(items, category) in checklistResult!.grouped" :key="category" class="checklist-group">
+                <div class="checklist-group-title">{{ category }}</div>
+                <a-list :data-source="items" size="small">
+                  <template #renderItem="{ item }">
+                    <a-list-item class="checklist-item">
+                      <a-checkbox :checked="item.is_checked" @change="(e: any) => toggleChecklistItem(item, e.target.checked)">
+                        <span :class="{ checked: item.is_checked }">{{ item.content }}</span>
+                      </a-checkbox>
+                      <template #actions>
+                        <a-popconfirm title="确定删除该条目?" @confirm="removeChecklistItem(item.id)">
+                          <a-button type="link" size="small" danger>删除</a-button>
+                        </a-popconfirm>
+                      </template>
+                    </a-list-item>
+                  </template>
+                </a-list>
+              </div>
+            </div>
+          </div>
+        </a-card>
+
+        <!-- 添加清单条目弹窗 -->
+        <a-modal v-model:open="showAddChecklist" title="添加清单条目" @ok="handleAddChecklistItem">
+          <a-form layout="vertical">
+            <a-form-item label="分类">
+              <a-select v-model:value="newChecklistItem.category">
+                <a-select-option value="证件">证件</a-select-option>
+                <a-select-option value="衣物">衣物</a-select-option>
+                <a-select-option value="电子">电子</a-select-option>
+                <a-select-option value="药品">药品</a-select-option>
+                <a-select-option value="其他">其他</a-select-option>
+              </a-select>
+            </a-form-item>
+            <a-form-item label="内容">
+              <a-input v-model:value="newChecklistItem.content" placeholder="例如:身份证、充电宝" />
+            </a-form-item>
+          </a-form>
+        </a-modal>
+
         <a-card id="weather" v-if="tripPlan.weather_info && tripPlan.weather_info.length > 0" title="天气信息" style="margin-top: 20px" :bordered="false">
         <a-list
           :data-source="tripPlan.weather_info"
@@ -309,12 +359,86 @@
       </div>
     </div>
 
+    <a-modal v-model:open="showConversation" title="AI 行程对话" width="760px" :footer="null">
+      <a-select v-if="versions.length" v-model:value="selectedVersionId" class="version-select" @change="applyVersion">
+        <a-select-option v-for="version in versions" :key="version.id" :value="version.id">版本 {{ version.version_number }} · {{ version.source }}</a-select-option>
+      </a-select>
+      <div class="message-list">
+        <div v-for="item in conversation?.messages || []" :key="item.id" :class="['chat-message', item.role]">
+          <div>{{ item.content }}</div>
+          <small v-if="item.task_status === 'failed'">处理失败</small>
+        </div>
+      </div>
+      <a-textarea v-model:value="chatInput" :rows="4" :disabled="chatLoading || !tripId" placeholder="例如：第二天增加博物馆，预算控制在 2000 元内" @pressEnter="handleChatEnter" />
+      <a-button class="chat-send-button" type="primary" :loading="chatLoading" :disabled="!tripId" @click="sendChatMessage">发送</a-button>
+      <div v-if="!tripId" class="chat-hint">请从“我的行程”打开已保存行程后使用多轮对话。</div>
+    </a-modal>
+
     <a-modal v-model:open="showOptimize" title="AI 优化行程" :confirm-loading="optimizing" @ok="submitOptimize">
       <a-textarea
         v-model:value="optimizeInstruction"
         :rows="5"
         placeholder="例如：减少购物安排，增加博物馆；预算控制在 2000 元内；每天不要太赶。"
       />
+    </a-modal>
+
+    <!-- 优化差异预览弹窗 -->
+    <a-modal
+      v-model:open="showDiffPreview"
+      title="优化变更预览"
+      width="720px"
+      :ok-text="'应用优化'"
+      :cancel-text="'放弃'"
+      :confirm-loading="applyingDiff"
+      @ok="applyOptimizeResult"
+    >
+      <div v-if="pendingOptimize" class="diff-preview">
+        <a-alert :message="pendingOptimize.diff.summary" type="info" show-icon class="diff-summary" />
+        <div v-if="pendingOptimize.diff.budget_change" class="budget-change">
+          <span>预算变化：</span>
+          <span class="old">¥{{ pendingOptimize.diff.budget_change.old }}</span>
+          <span>→</span>
+          <span :class="pendingOptimize.diff.budget_change.delta > 0 ? 'new up' : 'new down'">¥{{ pendingOptimize.diff.budget_change.new }}</span>
+          <span :class="pendingOptimize.diff.budget_change.delta > 0 ? 'delta up' : 'delta down'">
+            ({{ pendingOptimize.diff.budget_change.delta > 0 ? '+' : '' }}{{ pendingOptimize.diff.budget_change.delta }})
+          </span>
+        </div>
+        <a-empty v-if="!pendingOptimize.diff.days.length" description="无变更" />
+        <a-collapse v-else :active-key="pendingOptimize.diff.days.map(d => d.day_index)" class="diff-collapse">
+          <a-collapse-panel v-for="day in pendingOptimize.diff.days" :key="day.day_index" :header="`第 ${day.day_index + 1} 天`">
+            <div v-if="day.added_attractions.length" class="diff-row">
+              <a-tag color="green">新增景点</a-tag>
+              <span>{{ day.added_attractions.join('、') }}</span>
+            </div>
+            <div v-if="day.removed_attractions.length" class="diff-row">
+              <a-tag color="red">删除景点</a-tag>
+              <span>{{ day.removed_attractions.join('、') }}</span>
+            </div>
+            <div v-if="day.moved_to.length" class="diff-row">
+              <a-tag color="blue">移入景点</a-tag>
+              <span>{{ day.moved_to.join('、') }}</span>
+            </div>
+            <div v-if="day.moved_from.length" class="diff-row">
+              <a-tag color="orange">移出景点</a-tag>
+              <span>{{ day.moved_from.join('、') }}</span>
+            </div>
+            <div v-if="day.modified_attractions.length" class="diff-modified">
+              <div v-for="(change, idx) in day.modified_attractions" :key="idx" class="diff-row">
+                <a-tag color="purple">修改</a-tag>
+                <span>{{ change.name }} 的 {{ change.field }}：{{ change.old_value }} → {{ change.new_value }}</span>
+              </div>
+            </div>
+            <div v-if="day.added_meals.length" class="diff-row">
+              <a-tag color="green">新增餐饮</a-tag>
+              <span>{{ day.added_meals.join('、') }}</span>
+            </div>
+            <div v-if="day.removed_meals.length" class="diff-row">
+              <a-tag color="red">删除餐饮</a-tag>
+              <span>{{ day.removed_meals.join('、') }}</span>
+            </div>
+          </a-collapse-panel>
+        </a-collapse>
+      </div>
     </a-modal>
 
     <a-empty v-if="!tripPlan" description="没有找到旅行计划数据">
@@ -345,9 +469,9 @@ import AMapLoader from '@amap/amap-jsapi-loader'
 import * as echarts from 'echarts'
 import html2canvas from 'html2canvas'
 import jsPDF from 'jspdf'
-import { createConversation, getConversation, optimizeTrip, sendConversationMessage } from '@/services/api'
+import { createConversation, getConversation, optimizeTrip, sendConversationMessage, getChecklist, addChecklistItem, generateChecklist, updateChecklistItem, deleteChecklistItem } from '@/services/api'
 import { useTripStore } from '@/stores/trip'
-import type { Conversation, TripPlan, TripVersion } from '@/types'
+import type { Conversation, TripPlan, TripVersion, OptimizeResult, ChecklistResult, ChecklistCategory } from '@/types'
 
 const router = useRouter()
 const tripStore = useTripStore()
@@ -359,6 +483,7 @@ const activeSection = ref('overview')
 const activeDays = ref<number[]>([0])
 const budgetChartRef = ref<HTMLDivElement | null>(null)
 const showOptimize = ref(false)
+const showConversation = ref(false)
 const optimizing = ref(false)
 const optimizeInstruction = ref('')
 const tripId = ref<number | null>(Number(sessionStorage.getItem('tripId')) || null)
@@ -367,6 +492,16 @@ const versions = ref<TripVersion[]>([])
 const selectedVersionId = ref<number | undefined>()
 const chatInput = ref('')
 const chatLoading = ref(false)
+// 优化差异预览相关状态
+const showDiffPreview = ref(false)
+const pendingOptimize = ref<OptimizeResult | null>(null)
+const applyingDiff = ref(false)
+// 出行清单相关状态
+const checklistResult = ref<ChecklistResult | null>(null)
+const checklistLoading = ref(true)
+const generatingChecklist = ref(false)
+const showAddChecklist = ref(false)
+const newChecklistItem = ref<{ category: ChecklistCategory | string; content: string }>({ category: '其他', content: '' })
 let map: any = null
 let budgetChart: echarts.ECharts | null = null
 
@@ -377,6 +512,7 @@ onMounted(async () => {
     tripStore.setPlan(data)
     await initializeConversation()
     await loadAttractionPhotos()
+    await loadChecklist()
     await nextTick()
     initBudgetChart()
     initMap()
@@ -400,8 +536,9 @@ const initializeConversation = async () => {
 const applyVersion = (versionId: number) => {
   const version = versions.value.find(item => item.id === versionId)
   if (!version) return
-  tripPlan.value = JSON.parse(JSON.stringify(version.plan))
-  tripStore.setPlan(tripPlan.value)
+  const nextPlan = JSON.parse(JSON.stringify(version.plan)) as TripPlan
+  tripPlan.value = nextPlan
+  tripStore.setPlan(nextPlan)
   nextTick(() => {
     initBudgetChart()
     if (map) map.destroy()
@@ -551,20 +688,128 @@ const submitOptimize = async () => {
   }
   optimizing.value = true
   try {
-    const optimized = await optimizeTrip(tripPlan.value, optimizeInstruction.value)
-    tripPlan.value = optimized
-    tripStore.setPlan(optimized)
+    const result = await optimizeTrip(tripPlan.value, optimizeInstruction.value)
+    pendingOptimize.value = result
     showOptimize.value = false
+    showDiffPreview.value = true
     optimizeInstruction.value = ''
-    message.success('行程已优化并保存')
-    await nextTick()
-    initBudgetChart()
-    if (map) map.destroy()
-    initMap()
   } catch (error: any) {
     message.error(error.response?.data?.detail || error.message || '优化失败')
   } finally {
     optimizing.value = false
+  }
+}
+
+// 应用优化结果:用户在差异预览弹窗点击"应用优化"后执行
+const applyOptimizeResult = async () => {
+  if (!pendingOptimize.value) return
+  applyingDiff.value = true
+  try {
+    const optimized = pendingOptimize.value.plan
+    tripPlan.value = optimized
+    tripStore.setPlan(optimized)
+    // 优化后端创建了新行程记录,需同步更新 tripId 和 sessionStorage
+    if (pendingOptimize.value.trip) {
+      tripId.value = pendingOptimize.value.trip.id
+      sessionStorage.setItem('tripId', String(pendingOptimize.value.trip.id))
+      // 重置对话:新行程需要新的对话会话
+      conversation.value = null
+      tripStore.setConversation(null)
+    }
+    showDiffPreview.value = false
+    pendingOptimize.value = null
+    message.success('已应用优化后的行程')
+    await nextTick()
+    initBudgetChart()
+    if (map) map.destroy()
+    initMap()
+    // 重新加载清单(行程内容变化后,清单可能需要重新生成)
+    await loadChecklist()
+    // 为新行程创建新的对话会话,否则用户打开 AI 对话弹窗时无法发送消息
+    if (tripId.value) {
+      await initializeConversation()
+    }
+  } catch (error: any) {
+    message.error(error.message || '应用优化失败')
+  } finally {
+    applyingDiff.value = false
+  }
+}
+
+// ===== 出行清单 =====
+const loadChecklist = async () => {
+  if (!tripId.value) return
+  checklistLoading.value = true
+  try {
+    checklistResult.value = await getChecklist(tripId.value)
+  } catch (error: any) {
+    // 清单接口失败时静默处理,不阻塞行程展示
+    console.warn('加载清单失败:', error)
+    checklistResult.value = { items: [], grouped: {}, total: 0, checked_count: 0 }
+  } finally {
+    checklistLoading.value = false
+  }
+}
+
+const handleGenerateChecklist = async () => {
+  if (!tripId.value) return
+  generatingChecklist.value = true
+  try {
+    const created = await generateChecklist(tripId.value)
+    message.success(`AI 已生成 ${created.length} 个清单条目`)
+    await loadChecklist()
+  } catch (error: any) {
+    message.error(error.response?.data?.detail || error.message || 'AI 生成清单失败')
+  } finally {
+    generatingChecklist.value = false
+  }
+}
+
+const handleAddChecklistItem = async () => {
+  if (!tripId.value) return
+  if (!newChecklistItem.value.content.trim()) {
+    message.warning('请输入条目内容')
+    return
+  }
+  try {
+    await addChecklistItem(tripId.value, {
+      category: newChecklistItem.value.category,
+      content: newChecklistItem.value.content.trim(),
+    })
+    message.success('条目已添加')
+    newChecklistItem.value = { category: '其他', content: '' }
+    showAddChecklist.value = false
+    await loadChecklist()
+  } catch (error: any) {
+    message.error(error.response?.data?.detail || error.message || '添加失败')
+  }
+}
+
+const toggleChecklistItem = async (item: { id: number; is_checked: boolean }, checked: boolean) => {
+  // 乐观更新:先改 UI,失败再回滚
+  const original = item.is_checked
+  item.is_checked = checked
+  if (checklistResult.value) {
+    checklistResult.value.checked_count += checked ? 1 : -1
+  }
+  try {
+    await updateChecklistItem(item.id, { is_checked: checked })
+  } catch (error: any) {
+    item.is_checked = original
+    if (checklistResult.value) {
+      checklistResult.value.checked_count += original ? 1 : -1
+    }
+    message.error('更新失败,已回滚')
+  }
+}
+
+const removeChecklistItem = async (itemId: number) => {
+  try {
+    await deleteChecklistItem(itemId)
+    message.success('条目已删除')
+    await loadChecklist()
+  } catch (error: any) {
+    message.error(error.response?.data?.detail || error.message || '删除失败')
   }
 }
 
@@ -1085,20 +1330,17 @@ const drawRoutes = (AMap: any, attractions: any[]) => {
 }
 
 /* 内容布局 */
-.conversation-layout {
-  max-width: 1600px;
+.result-layout {
+  max-width: 1500px;
   margin: 0 auto;
+}
+
+.content-wrapper {
   display: flex;
-  gap: 20px;
+  gap: 24px;
   align-items: flex-start;
 }
 
-.conversation-panel {
-  width: 340px;
-  flex-shrink: 0;
-  position: sticky;
-  top: 80px;
-}
 
 .version-select {
   width: 100%;
@@ -1437,8 +1679,9 @@ const drawRoutes = (AMap: any, attractions: any[]) => {
 
 .day-header {
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-start;
   align-items: center;
+  gap: 12px;
   width: 100%;
 }
 
@@ -1451,6 +1694,120 @@ const drawRoutes = (AMap: any, attractions: any[]) => {
 .day-date {
   font-size: 14px;
   color: #999;
+}
+
+.plan-b-alert {
+  margin-bottom: 16px;
+}
+
+.route-timeline {
+  margin: 16px 0 8px;
+}
+
+/* 出行清单样式 */
+.checklist-card {
+  margin-top: 20px;
+}
+
+.checklist-loading {
+  text-align: center;
+  padding: 40px 0;
+}
+
+.checklist-progress {
+  margin-bottom: 20px;
+}
+
+.checklist-groups {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 20px;
+}
+
+.checklist-group {
+  background: linear-gradient(135deg, #f5f7fa 0%, #ffffff 100%);
+  border-radius: 8px;
+  padding: 12px;
+  border: 1px solid #e8e8e8;
+}
+
+.checklist-group-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #667eea;
+  margin-bottom: 8px;
+  padding-bottom: 6px;
+  border-bottom: 2px solid #667eea;
+}
+
+.checklist-item {
+  padding: 8px 4px !important;
+}
+
+.checklist-item .checked {
+  text-decoration: line-through;
+  color: #999;
+}
+
+/* 优化差异预览样式 */
+.diff-preview {
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.diff-summary {
+  margin-bottom: 16px;
+}
+
+.budget-change {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+  padding: 12px;
+  background: #fafafa;
+  border-radius: 8px;
+  font-size: 15px;
+}
+
+.budget-change .old {
+  color: #999;
+  text-decoration: line-through;
+}
+
+.budget-change .new.up {
+  color: #f5222d;
+  font-weight: 600;
+}
+
+.budget-change .new.down {
+  color: #52c41a;
+  font-weight: 600;
+}
+
+.budget-change .delta.up {
+  color: #f5222d;
+}
+
+.budget-change .delta.down {
+  color: #52c41a;
+}
+
+.diff-collapse {
+  background: transparent;
+}
+
+.diff-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.diff-modified {
+  margin-bottom: 8px;
 }
 
 .day-info {
@@ -1594,13 +1951,17 @@ const drawRoutes = (AMap: any, attractions: any[]) => {
     gap: 16px;
   }
 
-  .conversation-layout {
+  .content-wrapper {
     display: block;
   }
 
-  .conversation-panel {
+  .side-nav {
     width: 100%;
-    position: static;
+    margin-bottom: 16px;
+  }
+
+  .message-list {
+    max-height: 360px;
   }
 }
 </style>

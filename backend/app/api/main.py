@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from ..config import get_settings, validate_config, print_config
 from ..database import init_db
 from ..services.logging_config import setup_logging
-from .routes import auth, community, conversations, knowledge, logs, trip, trips, poi, map as map_routes
+from .routes import auth, checklists, community, conversations, knowledge, logs, preferences, trip, trips, poi, map as map_routes
 
 settings = get_settings()
 app = FastAPI(title=settings.app_name, version=settings.app_version, description="基于HelloAgents框架的智能旅行规划助手API", docs_url="/docs", redoc_url="/redoc")
@@ -19,6 +19,8 @@ app.include_router(knowledge.router, prefix="/api")
 app.include_router(poi.router, prefix="/api")
 app.include_router(map_routes.router, prefix="/api")
 app.include_router(community.router, prefix="/api")
+app.include_router(preferences.router, prefix="/api")
+app.include_router(checklists.router, prefix="/api")
 
 
 @app.on_event("startup")

@@ -14,6 +14,7 @@ import Discover from './views/Discover.vue'
 import PlaceDetail from './views/PlaceDetail.vue'
 import Community from './views/Community.vue'
 import CommunityAdmin from './views/CommunityAdmin.vue'
+import Preferences from './views/Preferences.vue'
 import { useAuthStore } from './stores/auth'
 
 const router = createRouter({
@@ -24,6 +25,7 @@ const router = createRouter({
     { path: '/trips', name: 'Trips', component: Trips, meta: { requiresAuth: true } },
     { path: '/discover', name: 'Discover', component: Discover, meta: { requiresAuth: true } },
     { path: '/places/:poiId', name: 'PlaceDetail', component: PlaceDetail, meta: { requiresAuth: true } },
+    { path: '/preferences', name: 'Preferences', component: Preferences, meta: { requiresAuth: true } },
     { path: '/community', name: 'Community', component: Community },
     { path: '/community/admin', name: 'CommunityAdmin', component: CommunityAdmin, meta: { requiresAuth: true, requiresAdmin: true } },
     { path: '/knowledge', name: 'Knowledge', component: Knowledge, meta: { requiresAuth: true, requiresAdmin: true } },

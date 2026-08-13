@@ -15,6 +15,7 @@ from ...models.schemas import TripPlan, TripPlanResponse, TripRequest
 from ...services.ai_guard_service import check_plan_rate_limit, get_cached_plan, set_cached_plan
 from ...services.ai_trip_service import optimize_trip_plan, parse_natural_language
 from ...services.knowledge_service import build_knowledge_context, search_relevant_knowledge
+from ...services.plan_diff_service import compute_plan_diff
 from ...services.trip_repository import create_generation_log, create_trip_record, trip_to_dict
 
 router = APIRouter(prefix="/trip", tags=["旅行规划"])
@@ -152,11 +153,14 @@ def stream_plan(http_request: Request, city: str = Query(...), start_date: str =
 @router.post("/optimize")
 def optimize_trip(request: OptimizeRequest, current_user=Depends(get_optional_user), db: Session = Depends(get_db)):
     try:
-        optimized = optimize_trip_plan(TripPlan(**request.plan), request.instruction)
+        original_plan = TripPlan(**request.plan)
+        optimized = optimize_trip_plan(original_plan, request.instruction)
+        # 计算优化前后的差异摘要,供前端预览变更
+        diff = compute_plan_diff(original_plan, optimized)
         record = None
         if current_user:
             record = create_trip_record(db, optimized, user_id=current_user.id, source="optimized")
-        return {"success": True, "message": "优化成功", "data": {"plan": optimized.model_dump(), "trip": trip_to_dict(record) if record else None}}
+        return {"success": True, "message": "优化成功", "data": {"plan": optimized.model_dump(), "diff": diff, "trip": trip_to_dict(record) if record else None}}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"优化失败: {str(e)}")
 

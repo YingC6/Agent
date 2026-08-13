@@ -253,6 +253,8 @@ class MultiAgentTripPlanner:
         Returns:
             旅行计划
         """
+        from ..services.agent_workflow import run_travel_workflow
+
         steps = []
 
         def emit(name: str, status: str, summary: str = "", started_at: float | None = None):
@@ -268,28 +270,19 @@ class MultiAgentTripPlanner:
 
         try:
             print(f"\n{'='*60}")
-            print(f"🚀 开始多智能体协作规划旅行...")
+            print(f"🚀 开始多智能体协作规划旅行(LangGraph 工作流)...")
             print(f"目的地: {request.city}")
             print(f"日期: {request.start_date} 至 {request.end_date}")
             print(f"天数: {request.travel_days}天")
             print(f"偏好: {', '.join(request.preferences) if request.preferences else '无'}")
             print(f"{'='*60}\n")
 
-            tool_results = self._run_research_agents_parallel(request, emit)
-            attraction_response = tool_results["attractions"]
-            weather_response = tool_results["weather"]
-            hotel_response = tool_results["hotels"]
-
-            start = time.time()
-            emit("行程规划Agent", "running", "正在整合景点、天气、酒店和知识库信息")
-            planner_query = self._build_planner_query(request, attraction_response, weather_response, hotel_response, knowledge_context)
-            planner_response = self.planner_agent.run(planner_query)
-            emit("行程规划Agent", "success", planner_response[:180], start)
-            print(f"行程规划结果: {planner_response[:300]}...\n")
-
-            trip_plan = self._parse_response(planner_response, request)
-            emit("结果校验", "success", "旅行计划结构化校验完成")
-            trip_plan = self._review_and_optimize_plan(trip_plan, request, emit)
+            trip_plan = run_travel_workflow(
+                request=request,
+                knowledge_context=knowledge_context,
+                progress_callback=progress_callback,
+                planner=self,
+            )
 
             print(f"{'='*60}")
             print(f"✅ 旅行计划生成完成!")
@@ -303,7 +296,87 @@ class MultiAgentTripPlanner:
             traceback.print_exc()
             emit("异常兜底", "failed", str(e))
             return self._create_fallback_plan(request)
-    
+
+    # ============ LangGraph 工作流阶段方法 ============
+
+    def research_phase(self, request: TripRequest, emit: Callable[[str, str, str, float | None], None]) -> dict[str, str]:
+        """阶段1: 并行调用景点/天气/酒店 Agent 收集原始信息。"""
+        return self._run_research_agents_parallel(request, emit)
+
+    def generate_phase(
+        self,
+        request: TripRequest,
+        tool_results: dict[str, str],
+        knowledge_context: str,
+        emit: Callable[[str, str, str, float | None], None],
+    ) -> TripPlan:
+        """阶段2: 整合工具结果与知识库,调用规划 Agent 生成结构化行程。"""
+        start = time.time()
+        emit("行程规划Agent", "running", "正在整合景点、天气、酒店和知识库信息")
+        planner_query = self._build_planner_query(
+            request,
+            tool_results.get("attractions", ""),
+            tool_results.get("weather", ""),
+            tool_results.get("hotels", ""),
+            knowledge_context,
+        )
+        planner_response = self.planner_agent.run(planner_query)
+        emit("行程规划Agent", "success", planner_response[:180], start)
+        print(f"行程规划结果: {planner_response[:300]}...\n")
+        trip_plan = self._parse_response(planner_response, request)
+        emit("结果校验", "success", "旅行计划结构化校验完成")
+        return trip_plan
+
+    def review_phase(
+        self,
+        plan: TripPlan,
+        request: TripRequest,
+        round_index: int,
+        emit: Callable[[str, str, str, float | None], None],
+    ) -> dict[str, Any]:
+        """阶段3: 调用审核 Agent 检查行程合理性,返回结构化审核结果。"""
+        start = time.time()
+        emit("行程审核Agent", "running", f"正在进行第{round_index + 1}轮行程审核")
+        review_query = json.dumps({"request": request.model_dump(), "plan": plan.model_dump()}, ensure_ascii=False)
+        review_response = self.review_agent.run(review_query)
+        review_data = self._parse_review_response(review_response)
+        if review_data.get("passed", False):
+            emit("行程审核Agent", "success", "审核通过", start)
+        else:
+            issues = review_data.get("issues", [])
+            issue_text = "；".join(str(item) for item in issues) or review_data.get("suggestions", "行程仍需优化")
+            emit("行程审核Agent", "failed", issue_text[:180], start)
+        return review_data
+
+    def optimize_phase(
+        self,
+        plan: TripPlan,
+        review_data: dict[str, Any],
+        request: TripRequest,
+        round_index: int,
+        emit: Callable[[str, str, str, float | None], None],
+    ) -> TripPlan:
+        """阶段4: 根据审核意见调用修正 Agent 优化行程。"""
+        start = time.time()
+        emit("行程修正Agent", "running", f"正在根据第{round_index + 1}轮审核意见修正行程")
+        optimize_query = json.dumps(
+            {"request": request.model_dump(), "plan": plan.model_dump(), "review": review_data},
+            ensure_ascii=False,
+        )
+        optimize_response = self.optimizer_agent.run(optimize_query)
+        current_plan = self._parse_response(optimize_response, request)
+        emit("行程修正Agent", "success", "行程修正完成", start)
+        return current_plan
+
+    def enrich_phase(
+        self,
+        plan: TripPlan,
+        request: TripRequest,
+        emit: Callable[[str, str, str, float | None], None],
+    ) -> TripPlan:
+        """阶段5: 补充真实通勤时长、舒适度与备选方案。"""
+        return self._enrich_plan_execution_data(plan, request, emit)
+
     def _run_research_agents_parallel(self, request: TripRequest, emit: Callable[[str, str, str, float | None], None]) -> dict[str, str]:
         tasks = {
             "attractions": ("景点搜索Agent", self.attraction_agent, self._build_attraction_query(request), "正在根据城市和偏好搜索景点"),
@@ -340,8 +413,7 @@ class MultiAgentTripPlanner:
         """构建景点搜索查询 - 直接包含工具调用"""
         keywords = []
         if request.preferences:
-            # 只取第一个偏好作为关键词
-            keywords = request.preferences[0]
+            keywords = " ".join(request.preferences[:3])
         else:
             keywords = "景点"
 
@@ -404,30 +476,69 @@ class MultiAgentTripPlanner:
         return json.loads(json_str)
 
     def _review_and_optimize_plan(self, plan: TripPlan, request: TripRequest, emit: Callable[[str, str, str, float | None], None]) -> TripPlan:
+        """兼容保留:旧版串行审核-修正循环,新流程请使用 review_phase/optimize_phase。"""
         settings = get_settings()
         current_plan = plan
         for round_index in range(settings.max_review_rounds + 1):
-            start = time.time()
-            emit("行程审核Agent", "running", f"正在进行第{round_index + 1}轮行程审核")
-            review_query = json.dumps({"request": request.model_dump(), "plan": current_plan.model_dump()}, ensure_ascii=False)
-            review_response = self.review_agent.run(review_query)
-            review_data = self._parse_review_response(review_response)
+            review_data = self.review_phase(current_plan, request, round_index, emit)
             if review_data.get("passed", False):
-                emit("行程审核Agent", "success", "审核通过", start)
                 return current_plan
-            issues = review_data.get("issues", [])
-            issue_text = "；".join(str(item) for item in issues) or review_data.get("suggestions", "行程仍需优化")
-            emit("行程审核Agent", "failed", issue_text[:180], start)
             if round_index >= settings.max_review_rounds:
                 current_plan.overall_suggestions = f"{current_plan.overall_suggestions}\n系统已完成{settings.max_review_rounds + 1}轮审核，建议出行前再次确认景点开放时间、路线和预算。"
                 return current_plan
-            start = time.time()
-            emit("行程修正Agent", "running", f"正在根据第{round_index + 1}轮审核意见修正行程")
-            optimize_query = json.dumps({"request": request.model_dump(), "plan": current_plan.model_dump(), "review": review_data}, ensure_ascii=False)
-            optimize_response = self.optimizer_agent.run(optimize_query)
-            current_plan = self._parse_response(optimize_response, request)
-            emit("行程修正Agent", "success", "行程修正完成", start)
+            current_plan = self.optimize_phase(current_plan, review_data, request, round_index, emit)
         return current_plan
+
+    def _enrich_plan_execution_data(self, plan: TripPlan, request: TripRequest, emit: Callable[[str, str, str, float | None], None]) -> TripPlan:
+        """补充每日真实通勤时长、舒适度评估与备选方案。
+
+        调用高德路线规划 API 计算相邻景点之间的真实距离与时长,
+        生成 route_segments 供前端绘制交通时间轴;
+        单点 API 失败时由 route_service 内部兜底估值,不影响整体流程。
+        """
+        from ..services.route_service import calculate_day_routes, summarize_transit_minutes
+
+        start = time.time()
+        emit("行程可执行性", "running", "正在调用高德路线规划计算每日真实通勤时长")
+        total_segments = 0
+        for day in plan.days:
+            if not day.attractions:
+                day.estimated_transit_minutes = 0
+                day.route_segments = []
+                day.plan_b = "如遇天气变化，建议通过 AI 对话重新安排当天景点。"
+                day.comfort_level = "适中"
+                continue
+            try:
+                segments = calculate_day_routes(
+                    attractions=day.attractions,
+                    city=plan.city,
+                    transportation=day.transportation or request.transportation,
+                )
+                day.route_segments = segments
+                day.estimated_transit_minutes = summarize_transit_minutes(segments)
+                total_segments += len(segments)
+            except Exception as exc:
+                print(f"⚠️  第{day.day_index + 1}天路线计算失败,使用估值兜底: {exc}")
+                day.estimated_transit_minutes = max(len(day.attractions) - 1, 0) * 20
+                day.route_segments = []
+
+            total_visit_minutes = sum(max(attraction.visit_duration or 0, 0) for attraction in day.attractions)
+            total_minutes = total_visit_minutes + day.estimated_transit_minutes
+            day.comfort_level = "轻松" if total_minutes <= 360 else "适中" if total_minutes <= 540 else "紧凑"
+
+            rain_sensitive_names = "、".join(attraction.name for attraction in day.attractions[:2])
+            day.plan_b = (
+                f"如遇降雨或拥挤，可优先保留室内场馆，并通过 AI 对话将 {rain_sensitive_names} 替换为附近室内景点。"
+                if day.attractions
+                else "如遇天气变化，建议通过 AI 对话重新安排当天景点。"
+            )
+        emit(
+            "行程可执行性",
+            "success",
+            f"已补充{len(plan.days)}天的真实通勤数据,共生成{total_segments}条路段",
+            start,
+        )
+        return plan
 
     def _parse_review_response(self, response: str) -> dict[str, Any]:
         try:
