@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import threading
 import time
 from dataclasses import dataclass, field
@@ -51,6 +52,7 @@ class _VectorStoreState:
     dimension: int = 0
     built_at: float = 0.0
     item_ids: set[int] = field(default_factory=set)
+    item_fingerprints: dict[int, str] = field(default_factory=dict)
 
 
 class VectorStore:
@@ -81,6 +83,12 @@ class VectorStore:
 
         # 收集所有分块
         all_chunks: list[KnowledgeChunk] = []
+        item_fingerprints = {
+            item.id: hashlib.sha256(
+                f"{item.title}\n{item.city}\n{item.days}\n{item.themes}\n{item.keywords}\n{item.content}".encode("utf-8")
+            ).hexdigest()
+            for item in items
+        }
         for item in items:
             chunks = split_knowledge_chunks(item)[:MAX_CHUNKS_PER_ITEM]
             all_chunks.extend(chunks)
@@ -91,6 +99,7 @@ class VectorStore:
                 self._state.index = None
                 self._state.chunks = []
                 self._state.item_ids = {item.id for item in items}
+                self._state.item_fingerprints = item_fingerprints
                 self._state.built_at = time.time()
             return True
 
@@ -123,6 +132,7 @@ class VectorStore:
             self._state.chunks = all_chunks
             self._state.dimension = dimension
             self._state.item_ids = {item.id for item in items}
+            self._state.item_fingerprints = item_fingerprints
             self._state.built_at = time.time()
 
         logger.info(
@@ -162,10 +172,21 @@ class VectorStore:
             results.append(VectorSearchResult(chunk=chunks[idx], score=float(score)))
         return results
 
-    def needs_rebuild(self, current_item_ids: set[int]) -> bool:
-        """检查索引是否需要重建(知识条目集合变化时)。"""
+    def needs_rebuild(self, items: list[KnowledgeItem] | set[int]) -> bool:
+        """检查索引是否需要重建(知识条目集合或内容变化时)。"""
         with self._lock:
-            return self._state.item_ids != current_item_ids
+            if isinstance(items, set):
+                return self._state.item_ids != items
+            current_ids = {item.id for item in items}
+            if self._state.item_ids != current_ids:
+                return True
+            current_fingerprints = {
+                item.id: hashlib.sha256(
+                    f"{item.title}\n{item.city}\n{item.days}\n{item.themes}\n{item.keywords}\n{item.content}".encode("utf-8")
+                ).hexdigest()
+                for item in items
+            }
+            return self._state.item_fingerprints != current_fingerprints
 
     @property
     def is_ready(self) -> bool:

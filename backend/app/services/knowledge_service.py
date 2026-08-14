@@ -222,10 +222,8 @@ def _vector_recall(
         return []
 
     vector_store = get_vector_store()
-    current_ids = {item.id for item in items}
-
     # 知识库变更时重建索引
-    if vector_store.needs_rebuild(current_ids) or not vector_store.is_ready:
+    if vector_store.needs_rebuild(items) or not vector_store.is_ready:
         built = vector_store.build_index(items)
         if not built:
             return []
