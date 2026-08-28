@@ -65,6 +65,14 @@
           <div class="left-info">
             <!-- 行程概览 -->
             <a-card id="overview" :title="`${tripPlan.city}旅行计划`" :bordered="false" class="overview-card">
+              <a-alert
+                v-if="tripPlan.is_fallback"
+                type="warning"
+                show-icon
+                message="当前展示的是备用行程"
+                :description="tripPlan.warnings?.join('；') || 'AI 服务未能完成真实规划，请确认景点、路线和预算后再出行。'"
+                class="plan-warning"
+              />
               <div class="overview-content">
                 <div class="info-item">
                   <span class="info-label">📅 日期:</span>
@@ -368,8 +376,26 @@
           <div>{{ item.content }}</div>
           <small v-if="item.task_status === 'failed'">处理失败</small>
         </div>
+        <div v-if="streamingContent" class="chat-message assistant streaming">{{ streamingContent }}<span class="streaming-cursor">▋</span></div>
       </div>
+      <a-card v-if="conversationQueryResults.length" size="small" title="实时查询结果" class="conversation-query-results">
+        <div v-for="result in conversationQueryResults" :key="`${result.type}-${result.title}`" class="query-result">
+          <strong>{{ result.title }}</strong>
+          <template v-if="result.type === 'transport'">
+            <div>距离 {{ formatDistance(result.data) }} · 预计 {{ formatDuration(result.data) }} · {{ formatRouteType(result.data) }}</div>
+          </template>
+          <template v-else-if="Array.isArray(result.data)">
+            <div v-for="poi in result.data" :key="poi.poi_id || poi.name">{{ poi.name }}<span v-if="poi.address"> · {{ poi.address }}</span></div>
+          </template>
+          <pre v-else>{{ JSON.stringify(result.data, null, 2) }}</pre>
+        </div>
+      </a-card>
       <a-textarea v-model:value="chatInput" :rows="4" :disabled="chatLoading || !tripId" placeholder="例如：第二天增加博物馆，预算控制在 2000 元内" @pressEnter="handleChatEnter" />
+      <div v-if="pendingConversationChange" class="conversation-change-preview">
+        <a-alert :message="pendingConversationChange.diff.summary" type="info" show-icon />
+        <a-button type="primary" :loading="chatLoading" @click="handleConversationChange('confirm')">确认保存</a-button>
+        <a-button :loading="chatLoading" @click="handleConversationChange('cancel')">放弃修改</a-button>
+      </div>
       <a-button class="chat-send-button" type="primary" :loading="chatLoading" :disabled="!tripId" @click="sendChatMessage">发送</a-button>
       <div v-if="!tripId" class="chat-hint">请从“我的行程”打开已保存行程后使用多轮对话。</div>
     </a-modal>
@@ -469,9 +495,9 @@ import AMapLoader from '@amap/amap-jsapi-loader'
 import * as echarts from 'echarts'
 import html2canvas from 'html2canvas'
 import jsPDF from 'jspdf'
-import { createConversation, getConversation, optimizeTrip, sendConversationMessage, getChecklist, addChecklistItem, generateChecklist, updateChecklistItem, deleteChecklistItem } from '@/services/api'
+import { createConversation, getConversation, optimizeTrip, streamConversationMessage, confirmConversationChange, getChecklist, addChecklistItem, generateChecklist, updateChecklistItem, deleteChecklistItem } from '@/services/api'
 import { useTripStore } from '@/stores/trip'
-import type { Conversation, TripPlan, TripVersion, OptimizeResult, ChecklistResult, ChecklistCategory } from '@/types'
+import type { Conversation, ConversationQueryResult, TripPlan, TripVersion, OptimizeResult, ChecklistResult, ChecklistCategory } from '@/types'
 
 const router = useRouter()
 const tripStore = useTripStore()
@@ -492,6 +518,9 @@ const versions = ref<TripVersion[]>([])
 const selectedVersionId = ref<number | undefined>()
 const chatInput = ref('')
 const chatLoading = ref(false)
+const pendingConversationChange = ref<{ plan: TripPlan; diff: { summary: string; [key: string]: unknown } } | null>(null)
+const streamingContent = ref('')
+const conversationQueryResults = ref<ConversationQueryResult[]>([])
 // 优化差异预览相关状态
 const showDiffPreview = ref(false)
 const pendingOptimize = ref<OptimizeResult | null>(null)
@@ -550,12 +579,28 @@ const sendChatMessage = async () => {
   if (!conversation.value || !chatInput.value.trim()) return
   chatLoading.value = true
   try {
-    const reply = await sendConversationMessage(conversation.value.id, chatInput.value.trim())
+    const content = chatInput.value.trim()
+    streamingContent.value = ''
+    const reply = await streamConversationMessage(conversation.value.id, content, {
+      onMeta: (meta) => { conversationQueryResults.value = meta.query_results },
+      onDelta: (delta) => { streamingContent.value += delta }
+    })
+    streamingContent.value = ''
     conversation.value = reply.conversation
     tripStore.setConversation(reply.conversation)
     versions.value = reply.trip.versions || versions.value
     selectedVersionId.value = reply.conversation.current_version_id
+    pendingConversationChange.value = reply.pending_change || null
+    conversationQueryResults.value = reply.query_results
     if (reply.message.version_id) applyVersion(reply.message.version_id)
+    if (reply.pending_change?.plan && reply.pending_change.diff) {
+      tripPlan.value = reply.pending_change.plan
+      tripStore.setPlan(reply.pending_change.plan)
+      await nextTick()
+      initBudgetChart()
+      if (map) map.destroy()
+      initMap()
+    }
     chatInput.value = ''
   } catch (error: any) {
     message.error(error.response?.data?.detail || error.message || '发送失败')
@@ -563,6 +608,46 @@ const sendChatMessage = async () => {
     chatLoading.value = false
   }
 }
+
+const handleConversationChange = async (action: 'confirm' | 'cancel') => {
+  if (!conversation.value) return
+  chatLoading.value = true
+  try {
+    const reply = await confirmConversationChange(conversation.value.id, action)
+    conversation.value = reply.conversation
+    tripStore.setConversation(reply.conversation)
+    pendingConversationChange.value = null
+    if (action === 'confirm') {
+      versions.value = reply.trip?.versions || versions.value
+      selectedVersionId.value = reply.conversation.current_version_id
+      if (reply.trip?.plan) applyVersion(reply.conversation.current_version_id || 0)
+      message.success('行程修改已保存')
+    } else {
+      const version = versions.value.find(item => item.id === selectedVersionId.value)
+      if (version) {
+        const restored = JSON.parse(JSON.stringify(version.plan)) as TripPlan
+        tripPlan.value = restored
+        tripStore.setPlan(restored)
+        await nextTick()
+        initBudgetChart()
+        if (map) map.destroy()
+        initMap()
+      }
+      message.info('已放弃候选修改')
+    }
+  } catch (error: any) {
+    message.error(error.response?.data?.detail || error.message || '操作失败')
+  } finally {
+    chatLoading.value = false
+  }
+}
+
+const formatDistance = (data: unknown) => {
+  const value = (data as { distance_meters?: number }).distance_meters || 0
+  return value >= 1000 ? `${(value / 1000).toFixed(1)} km` : `${value} m`
+}
+const formatDuration = (data: unknown) => `${Math.ceil(((data as { duration_seconds?: number }).duration_seconds || 0) / 60)} 分钟`
+const formatRouteType = (data: unknown) => ({ walking: '步行', driving: '驾车', transit: '公共交通' }[(data as { route_type?: string }).route_type || 'transit'] || '公共交通')
 
 const handleChatEnter = (event: KeyboardEvent) => {
   if (!event.shiftKey) {
@@ -1377,6 +1462,46 @@ const drawRoutes = (AMap: any, attractions: any[]) => {
   margin-top: 8px;
 }
 
+.conversation-query-results {
+  margin-bottom: 12px;
+}
+
+.query-result {
+  padding: 8px 0;
+  border-bottom: 1px solid #f0f0f0;
+  line-height: 1.7;
+}
+
+.query-result:last-child {
+  border-bottom: 0;
+}
+
+.query-result pre {
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+}
+
+.streaming-cursor {
+  animation: blink 0.9s step-end infinite;
+}
+
+@keyframes blink {
+  50% { opacity: 0; }
+}
+
+.conversation-change-preview {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+
+.conversation-change-preview .ant-alert {
+  flex: 1;
+  min-width: 240px;
+}
+
 .content-wrapper {
   flex: 1;
   max-width: 1400px;
@@ -1577,6 +1702,10 @@ const drawRoutes = (AMap: any, attractions: any[]) => {
 /* 行程概览卡片 */
 .overview-card {
   height: fit-content;
+}
+
+.plan-warning {
+  margin-bottom: 16px;
 }
 
 .overview-content {

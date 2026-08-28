@@ -1,3 +1,4 @@
+import json
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
@@ -44,13 +45,39 @@ class ToolGovernance:
         raise last_error or RuntimeError(f"工具{tool_name}调用失败")
 
     def _validate_query(self, tool_name: str, query: str, policy: ToolPolicy) -> None:
-        match = re.search(r"\[TOOL_CALL:([^:]+):([^\]]+)\]", query)
-        if not match:
-            raise ValueError(f"工具{tool_name}请求缺少标准调用格式")
-        actual_name, raw_parameters = match.groups()
+        actual_name, parameters = self._extract_tool_call(query)
         if actual_name != tool_name:
             raise ValueError(f"工具请求不匹配: {actual_name}")
-        parameters = {item.split("=", 1)[0].strip() for item in raw_parameters.split(",") if "=" in item}
-        missing = set(policy.required_parameters) - parameters
+        missing = set(policy.required_parameters) - set(parameters)
         if missing:
             raise ValueError(f"工具{tool_name}缺少参数: {','.join(sorted(missing))}")
+        invalid = [name for name in policy.required_parameters if not isinstance(parameters[name], str) or not parameters[name].strip()]
+        if invalid:
+            raise ValueError(f"工具{tool_name}参数不能为空: {','.join(invalid)}")
+
+    @staticmethod
+    def _extract_tool_call(query: str) -> tuple[str, dict[str, Any]]:
+        json_match = re.search(r"\[TOOL_CALL_JSON:(\{.*?\})\]", query, re.DOTALL)
+        if json_match:
+            try:
+                payload = json.loads(json_match.group(1))
+            except json.JSONDecodeError as error:
+                raise ValueError("工具调用JSON格式无效") from error
+            if not isinstance(payload, dict):
+                raise ValueError("工具调用JSON必须是对象")
+            tool_name = payload.get("name")
+            parameters = payload.get("arguments")
+            if not isinstance(tool_name, str) or not isinstance(parameters, dict):
+                raise ValueError("工具调用JSON必须包含name和arguments对象")
+            return tool_name, parameters
+
+        legacy_match = re.search(r"\[TOOL_CALL:([^:]+):([^\]]+)\]", query)
+        if not legacy_match:
+            raise ValueError("工具请求缺少标准调用格式")
+        tool_name, raw_parameters = legacy_match.groups()
+        parameters = {
+            item.split("=", 1)[0].strip(): item.split("=", 1)[1].strip()
+            for item in raw_parameters.split(",")
+            if "=" in item
+        }
+        return tool_name, parameters

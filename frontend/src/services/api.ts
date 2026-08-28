@@ -1,5 +1,5 @@
 import axios from 'axios'
-import type { AuthResponse, Conversation, ConversationReply, CommunityPoi, CommunityPost, CommunityStats, KnowledgeItem, ModerationComment, ModerationPost, PageResult, PoiActionResponse, PoiDetail, PoiInteractionSummary, TripFormData, TripPlan, TripPlanResponse, TripRating, TripRecord, UserInfo, UserPreference, PreferenceType, ChecklistItem, ChecklistResult, ChecklistCategory, OptimizeResult } from '@/types'
+import type { AuthResponse, Conversation, ConversationReply, ConversationStreamHandlers, CommunityPoi, CommunityPost, CommunityStats, KnowledgeItem, ModerationComment, ModerationPost, PageResult, PoiActionResponse, PoiDetail, PoiInteractionSummary, TripFormData, TripPlan, TripPlanResponse, TripRating, TripRecord, UserInfo, UserPreference, PreferenceType, ChecklistItem, ChecklistResult, ChecklistCategory, OptimizeResult } from '@/types'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
 
@@ -21,6 +21,34 @@ export async function deleteTrip(id: number): Promise<void> { await apiClient.de
 export async function createConversation(tripId: number, title = '旅行计划对话'): Promise<Conversation> { return (await apiClient.post<{ success: boolean; data: Conversation }>('/api/conversations', { trip_id: tripId, title })).data.data }
 export async function getConversation(id: number): Promise<Conversation> { return (await apiClient.get<{ success: boolean; data: Conversation }>(`/api/conversations/${id}`)).data.data }
 export async function sendConversationMessage(id: number, content: string): Promise<ConversationReply> { return (await apiClient.post<{ success: boolean; data: ConversationReply }>(`/api/conversations/${id}/messages`, { content })).data.data }
+export async function streamConversationMessage(id: number, content: string, handlers: ConversationStreamHandlers): Promise<ConversationReply> {
+  const response = await fetch(`${API_BASE_URL}/api/conversations/${id}/messages/stream`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('token') || ''}` }, body: JSON.stringify({ content }) })
+  if (!response.ok || !response.body) throw new Error(await response.text() || '流式对话请求失败')
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let reply: ConversationReply | null = null
+  while (true) {
+    const { done, value } = await reader.read()
+    buffer += decoder.decode(value || new Uint8Array(), { stream: !done })
+    const frames = buffer.split('\n\n')
+    buffer = frames.pop() || ''
+    for (const frame of frames) {
+      const event = frame.match(/^event: (.+)$/m)?.[1]
+      const raw = frame.match(/^data: (.+)$/m)?.[1]
+      if (!event || !raw) continue
+      const data = JSON.parse(raw)
+      if (event === 'meta') handlers.onMeta?.(data)
+      if (event === 'delta') handlers.onDelta(data.content)
+      if (event === 'done') reply = data as ConversationReply
+      if (event === 'error') throw new Error(data.message || '流式对话请求失败')
+    }
+    if (done) break
+  }
+  if (!reply) throw new Error('流式对话未返回完成结果')
+  return reply
+}
+export async function confirmConversationChange(id: number, action: 'confirm' | 'cancel'): Promise<ConversationReply> { return (await apiClient.post<{ success: boolean; data: ConversationReply }>(`/api/conversations/${id}/confirm`, { action })).data.data }
 export async function listKnowledge(params: { city?: string; source?: string } = {}): Promise<KnowledgeItem[]> { return (await apiClient.get<{ success: boolean; data: KnowledgeItem[] }>('/api/knowledge', { params })).data.data }
 export async function importMarkdownKnowledge(markdown: string): Promise<KnowledgeItem> { return (await apiClient.post<{ success: boolean; data: KnowledgeItem }>('/api/knowledge/import-markdown', { markdown })).data.data }
 export async function deleteKnowledge(id: number): Promise<void> { await apiClient.delete(`/api/knowledge/${id}`) }
@@ -42,14 +70,11 @@ export async function moderatePost(id: number, status: 'approved' | 'rejected'):
 export async function moderateComment(id: number, status: 'approved' | 'rejected'): Promise<void> { await apiClient.patch(`/api/community/admin/moderation/comments/${id}`, { status }) }
 export async function healthCheck(): Promise<unknown> { return (await apiClient.get('/health')).data }
 
-// ===== 用户偏好记忆 =====
 export async function listPreferences(): Promise<UserPreference[]> { return (await apiClient.get<{ success: boolean; data: UserPreference[] }>('/api/preferences')).data.data }
 export async function getPreferenceContext(): Promise<string> { return (await apiClient.get<{ success: boolean; data: { context: string } }>('/api/preferences/context')).data.data.context }
 export async function createPreference(data: { memory_type: PreferenceType; content: string; importance: number }): Promise<UserPreference> { return (await apiClient.post<{ success: boolean; data: UserPreference }>('/api/preferences', data)).data.data }
 export async function updatePreference(id: number, data: { content?: string; importance?: number }): Promise<UserPreference> { return (await apiClient.put<{ success: boolean; data: UserPreference }>(`/api/preferences/${id}`, data)).data.data }
 export async function deletePreference(id: number): Promise<void> { await apiClient.delete(`/api/preferences/${id}`) }
-
-// ===== 出行清单 =====
 export async function getChecklist(tripId: number): Promise<ChecklistResult> { return (await apiClient.get<{ success: boolean; data: ChecklistResult }>(`/api/trips/${tripId}/checklist`)).data.data }
 export async function addChecklistItem(tripId: number, data: { category: ChecklistCategory | string; content: string; sort_order?: number }): Promise<ChecklistItem> { return (await apiClient.post<{ success: boolean; data: ChecklistItem }>(`/api/trips/${tripId}/checklist`, data)).data.data }
 export async function generateChecklist(tripId: number): Promise<ChecklistItem[]> { return (await apiClient.post<{ success: boolean; data: ChecklistItem[] }>(`/api/trips/${tripId}/checklist/generate`)).data.data }

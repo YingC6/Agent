@@ -161,6 +161,9 @@ class TripPlan(BaseModel):
     weather_info: List[WeatherInfo] = Field(default=[], description="天气信息")
     overall_suggestions: str = Field(..., description="总体建议")
     budget: Optional[Budget] = Field(default=None, description="预算信息")
+    source: str = Field(default="ai", description="计划来源")
+    is_fallback: bool = Field(default=False, description="是否为降级计划")
+    warnings: List[str] = Field(default=[], description="计划警告")
 
 
     @model_validator(mode="after")
@@ -187,6 +190,7 @@ class TripPlanResponse(BaseModel):
     """旅行计划响应"""
     success: bool = Field(..., description="是否成功")
     message: str = Field(default="", description="消息")
+    run_id: Optional[str] = Field(default=None, description="本次生成运行标识")
     data: Optional[TripPlan] = Field(default=None, description="旅行计划数据")
 
 

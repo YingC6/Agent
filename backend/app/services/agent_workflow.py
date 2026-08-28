@@ -26,6 +26,7 @@
 from __future__ import annotations
 
 import time
+import uuid
 from typing import Any, Callable, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -33,6 +34,7 @@ from loguru import logger
 
 from ..config import get_settings
 from ..models.schemas import TripPlan, TripRequest
+from .plan_validator import validate_plan_execution
 
 
 class TravelWorkflowState(TypedDict, total=False):
@@ -51,17 +53,31 @@ class TravelWorkflowState(TypedDict, total=False):
     review_data: dict[str, Any]
     review_round: int
     max_rounds: int
+    run_id: str
 
 
-def _make_emit(progress_callback: Callable[[dict[str, Any]], None] | None) -> Callable[[str, str, str, float | None], None]:
+def _make_emit(
+    progress_callback: Callable[[dict[str, Any]], None] | None,
+    run_id: str,
+) -> Callable[[str, str, str, float | None], None]:
     """构造 emit 闭包,统一封装步骤事件并转发给前端 progress_callback。"""
     def emit(name: str, status: str, summary: str = "", started_at: float | None = None) -> None:
         step = {
+            "run_id": run_id,
             "name": name,
             "status": status,
             "summary": summary,
             "duration_ms": int((time.time() - started_at) * 1000) if started_at else 0,
+            "timestamp_ms": int(time.time() * 1000),
         }
+        logger.info(
+            "workflow_step run_id={} node={} status={} duration_ms={} summary={}",
+            run_id,
+            name,
+            status,
+            step["duration_ms"],
+            summary[:180],
+        )
         if progress_callback:
             progress_callback(step)
     return emit
@@ -69,7 +85,8 @@ def _make_emit(progress_callback: Callable[[dict[str, Any]], None] | None) -> Ca
 
 def _prepare_context(state: TravelWorkflowState) -> dict[str, Any]:
     """初始化节点:构造 emit 闭包,读取最大审核轮次配置。"""
-    emit = _make_emit(state.get("progress_callback"))
+    run_id = state["run_id"]
+    emit = _make_emit(state.get("progress_callback"), run_id)
     settings = get_settings()
     emit("LangGraph工作流", "success", "已完成需求、知识上下文和工具执行状态初始化")
     return {
@@ -132,6 +149,23 @@ def _enrich(state: TravelWorkflowState) -> dict[str, Any]:
     return {"plan": enriched_plan}
 
 
+def _validate_execution(state: TravelWorkflowState) -> dict[str, Any]:
+    """节点6: 以确定性规则验证行程数据与可执行性。"""
+    emit = state["emit"]
+    plan = state["plan"]
+    request = state["request"]
+    result = validate_plan_execution(plan, request)
+    if result.errors:
+        emit("确定性行程校验", "failed", "；".join(result.errors[:3]))
+        raise ValueError("；".join(result.errors))
+    if result.warnings:
+        plan.warnings = [*plan.warnings, *result.warnings]
+        emit("确定性行程校验", "success", "；".join(result.warnings[:3]))
+    else:
+        emit("确定性行程校验", "success", "城市、日期、景点、预算和通勤规则校验通过")
+    return {"plan": plan}
+
+
 def _route_after_review(state: TravelWorkflowState) -> str:
     """条件路由:审核通过或达到最大轮次时进入 enrich,否则进入 optimize。"""
     review_data = state.get("review_data", {})
@@ -164,6 +198,7 @@ def _build_travel_graph() -> Any:
     graph.add_node("review", _review)
     graph.add_node("optimize", _optimize)
     graph.add_node("enrich", _enrich)
+    graph.add_node("validate_execution", _validate_execution)
 
     graph.add_edge(START, "prepare_context")
     graph.add_edge("prepare_context", "research")
@@ -175,7 +210,8 @@ def _build_travel_graph() -> Any:
         {"enrich": "enrich", "optimize": "optimize"},
     )
     graph.add_edge("optimize", "review")
-    graph.add_edge("enrich", END)
+    graph.add_edge("enrich", "validate_execution")
+    graph.add_edge("validate_execution", END)
     return graph.compile()
 
 
@@ -195,6 +231,7 @@ def run_travel_workflow(
     knowledge_context: str,
     progress_callback: Callable[[dict[str, Any]], None] | None,
     planner: Any = None,
+    run_id: str = "",
 ) -> TripPlan:
     """运行 LangGraph 旅行规划工作流。
 
@@ -210,12 +247,26 @@ def run_travel_workflow(
     if planner is None:
         raise ValueError("run_travel_workflow 需要 planner 实例以调用各阶段方法")
 
+    resolved_run_id = run_id or uuid.uuid4().hex
     graph = _get_travel_graph()
     initial_state: TravelWorkflowState = {
         "request": request,
         "knowledge_context": knowledge_context,
         "progress_callback": progress_callback,
         "planner": planner,
+        "run_id": resolved_run_id,
     }
-    final_state = graph.invoke(initial_state)
-    return final_state["plan"]
+    logger.info("workflow_started run_id={} city={} travel_days={}", resolved_run_id, request.city, request.travel_days)
+    try:
+        final_state = graph.invoke(initial_state)
+        plan = final_state["plan"]
+        logger.info(
+            "workflow_completed run_id={} source={} fallback={}",
+            resolved_run_id,
+            plan.source,
+            plan.is_fallback,
+        )
+        return plan
+    except Exception:
+        logger.exception("workflow_failed run_id={}", resolved_run_id)
+        raise

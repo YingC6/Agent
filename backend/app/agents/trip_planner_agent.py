@@ -24,7 +24,7 @@ ATTRACTION_AGENT_PROMPT = """你是景点搜索专家。你的任务是根据城
 
 **示例:**
 用户: "搜索北京的历史文化景点"
-你的回复: [TOOL_CALL:amap_maps_text_search:keywords=历史文化,city=北京]
+你的回复: [TOOL_CALL_JSON:{"name":"amap_maps_text_search","arguments":{"keywords":"历史文化","city":"北京"}}]
 
 用户: "搜索上海的公园"
 你的回复: [TOOL_CALL:amap_maps_text_search:keywords=公园,city=上海]
@@ -42,7 +42,7 @@ WEATHER_AGENT_PROMPT = """你是天气查询专家。你的任务是查询指定
 
 **工具调用格式:**
 使用maps_weather工具时,必须严格按照以下格式:
-`[TOOL_CALL:amap_maps_weather:city=城市名]`
+`[TOOL_CALL_JSON:{"name":"amap_maps_weather","arguments":{"city":"城市名"}}]`
 
 **示例:**
 用户: "查询北京天气"
@@ -243,7 +243,13 @@ class MultiAgentTripPlanner:
             traceback.print_exc()
             raise
     
-    def plan_trip(self, request: TripRequest, progress_callback: Callable[[dict], None] | None = None, knowledge_context: str = "") -> TripPlan:
+    def plan_trip(
+        self,
+        request: TripRequest,
+        progress_callback: Callable[[dict], None] | None = None,
+        knowledge_context: str = "",
+        run_id: str = "",
+    ) -> TripPlan:
         """
         使用多智能体协作生成旅行计划
 
@@ -282,6 +288,7 @@ class MultiAgentTripPlanner:
                 knowledge_context=knowledge_context,
                 progress_callback=progress_callback,
                 planner=self,
+                run_id=run_id,
             )
 
             print(f"{'='*60}")
@@ -295,7 +302,7 @@ class MultiAgentTripPlanner:
             import traceback
             traceback.print_exc()
             emit("异常兜底", "failed", str(e))
-            return self._create_fallback_plan(request)
+            return self._create_fallback_plan(request, str(e))
 
     # ============ LangGraph 工作流阶段方法 ============
 
@@ -380,8 +387,8 @@ class MultiAgentTripPlanner:
     def _run_research_agents_parallel(self, request: TripRequest, emit: Callable[[str, str, str, float | None], None]) -> dict[str, str]:
         tasks = {
             "attractions": ("景点搜索Agent", self.attraction_agent, self._build_attraction_query(request), "正在根据城市和偏好搜索景点"),
-            "weather": ("天气查询Agent", self.weather_agent, f"请使用amap_maps_weather工具查询{request.city}天气。\n[TOOL_CALL:amap_maps_weather:city={request.city}]", "正在查询目的地天气"),
-            "hotels": ("酒店推荐Agent", self.hotel_agent, f"请使用amap_maps_text_search工具搜索{request.city}的{request.accommodation}酒店。\n[TOOL_CALL:amap_maps_text_search:keywords={request.accommodation}酒店,city={request.city}]", "正在搜索匹配住宿偏好的酒店")
+            "weather": ("天气查询Agent", self.weather_agent, f"请使用amap_maps_weather工具查询{request.city}天气。\n[TOOL_CALL_JSON:{json.dumps({'name': 'amap_maps_weather', 'arguments': {'city': request.city}}, ensure_ascii=False)}]", "正在查询目的地天气"),
+            "hotels": ("酒店推荐Agent", self.hotel_agent, f"请使用amap_maps_text_search工具搜索{request.city}的{request.accommodation}酒店。\n[TOOL_CALL_JSON:{json.dumps({'name': 'amap_maps_text_search', 'arguments': {'keywords': f'{request.accommodation}酒店', 'city': request.city}}, ensure_ascii=False)}]", "正在搜索匹配住宿偏好的酒店")
         }
         results: dict[str, str] = {}
         started_at: dict[str, float] = {}
@@ -418,7 +425,8 @@ class MultiAgentTripPlanner:
             keywords = "景点"
 
         # 直接返回工具调用格式
-        query = f"请使用amap_maps_text_search工具搜索{request.city}的{keywords}相关景点。\n[TOOL_CALL:amap_maps_text_search:keywords={keywords},city={request.city}]"
+        payload = json.dumps({"name": "amap_maps_text_search", "arguments": {"keywords": keywords, "city": request.city}}, ensure_ascii=False)
+        query = f"请使用amap_maps_text_search工具搜索{request.city}的{keywords}相关景点。\n[TOOL_CALL_JSON:{payload}]"
         return query
 
     def _build_planner_query(self, request: TripRequest, attractions: str, weather: str, hotels: str = "", knowledge_context: str = "") -> str:
@@ -569,9 +577,9 @@ class MultiAgentTripPlanner:
         except Exception as e:
             print(f"⚠️  解析响应失败: {str(e)}")
             print(f"   将使用备用方案生成计划")
-            return self._create_fallback_plan(request)
+            return self._create_fallback_plan(request, f"规划结果解析失败: {str(e)}")
     
-    def _create_fallback_plan(self, request: TripRequest) -> TripPlan:
+    def _create_fallback_plan(self, request: TripRequest, reason: str = "") -> TripPlan:
         """创建备用计划(当Agent失败时)"""
         from datetime import datetime, timedelta
         
@@ -614,7 +622,10 @@ class MultiAgentTripPlanner:
             end_date=request.end_date,
             days=days,
             weather_info=[],
-            overall_suggestions=f"这是为您规划的{request.city}{request.travel_days}日游行程,建议提前查看各景点的开放时间。"
+            overall_suggestions=f"这是为您规划的{request.city}{request.travel_days}日游行程,建议提前查看各景点的开放时间。",
+            source="fallback",
+            is_fallback=True,
+            warnings=[f"AI 规划未完成，当前展示的是备用行程。{reason}".strip()],
         )
 
 

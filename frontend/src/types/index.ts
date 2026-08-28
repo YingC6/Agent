@@ -1,4 +1,4 @@
-export interface Location {
+﻿export interface Location {
   longitude: number
   latitude: number
 }
@@ -43,19 +43,24 @@ export interface DayPlan {
   plan_b?: string
 }
 export interface WeatherInfo { date: string; day_weather: string; night_weather: string; day_temp: number; night_temp: number; wind_direction: string; wind_power: string }
-export interface TripPlan { city: string; start_date: string; end_date: string; days: DayPlan[]; weather_info: WeatherInfo[]; overall_suggestions: string; budget?: Budget }
+export interface TripPlan { city: string; start_date: string; end_date: string; days: DayPlan[]; weather_info: WeatherInfo[]; overall_suggestions: string; budget?: Budget; source?: string; is_fallback?: boolean; warnings?: string[] }
 export interface TripFormData { city: string; start_date: string; end_date: string; travel_days: number; transportation: string; accommodation: string; preferences: string[]; free_text_input: string }
-export interface TripPlanResponse { success: boolean; message: string; data?: TripPlan }
+export interface TripPlanResponse { success: boolean; message: string; run_id?: string; data?: TripPlan }
 export interface TripRating { id: number; trip_id: number; rating: number; comment: string }
 export interface KnowledgeItem { id: number; title: string; city: string; days?: number; themes: string[]; keywords: string[]; source: string; source_ref_id?: number; content: string; rating: number; usage_count: number; created_at: string }
 export interface UserInfo { id: number; username: string; nickname: string; role: string }
 export interface AuthResponse { success: boolean; message: string; token?: string; user?: UserInfo }
-export interface AgentStep { name: string; status: 'running' | 'success' | 'failed' | string; summary: string; duration_ms: number }
+export interface AgentStep { run_id?: string; name: string; status: 'running' | 'success' | 'failed' | string; summary: string; duration_ms: number; timestamp_ms?: number }
 export interface TripVersion { id: number; version_number: number; source: string; plan: TripPlan; created_at: string }
 export interface TripRecord { id: number; title: string; city: string; start_date: string; end_date: string; travel_days: number; source: string; plan: TripPlan; versions?: TripVersion[]; rating?: TripRating; created_at: string }
 export interface ConversationMessage { id: number; role: 'user' | 'assistant' | string; content: string; version_id?: number; task_status: 'running' | 'completed' | 'failed' | string; task_steps: AgentStep[]; error_message?: string; duration_ms: number; created_at: string }
+export type ConversationIntentName = 'confirm' | 'cancel' | 'modify' | 'weather' | 'restaurant_search' | 'transport_search' | 'poi_search' | 'answer'
+export interface ConversationIntent { name: ConversationIntentName; query: string; origin: string; destination: string; route_type: 'walking' | 'driving' | 'transit' }
+export interface ConversationQueryResult { type: 'weather' | 'restaurant' | 'transport' | 'poi'; title: string; data: any }
 export interface Conversation { id: number; trip_id?: number; current_version_id?: number; title: string; summary: string; summarized_message_count: number; versions?: TripVersion[]; messages: ConversationMessage[]; created_at: string; updated_at: string }
-export interface ConversationReply { conversation: Conversation; message: ConversationMessage; trip: TripRecord }
+export interface PendingPlanChange { plan: TripPlan; diff: { summary: string; [key: string]: unknown } }
+export interface ConversationReply { conversation: Conversation; message: ConversationMessage; trip: TripRecord; pending_change?: PendingPlanChange | null; intent: ConversationIntent; query_results: ConversationQueryResult[] }
+export interface ConversationStreamHandlers { onMeta?: (meta: { intent: ConversationIntent; query_results: ConversationQueryResult[] }) => void; onDelta: (content: string) => void }
 export interface PageResult<T> { items: T[]; total: number }
 
 export interface CommunityPoi {
@@ -79,7 +84,6 @@ export interface ModerationPost extends CommunityPost {}
 export interface ModerationComment extends PostComment { post_id: number }
 export interface CommunityStats { posts: Record<'total' | 'pending' | 'approved' | 'rejected', number>; comments: Record<'total' | 'pending' | 'approved' | 'rejected', number>; poi_interactions: { favorites: number; checkins: number; reviews: number; likes: number } }
 
-// ===== 用户偏好记忆 =====
 export type PreferenceType = 'preference' | 'avoidance' | 'budget'
 export interface UserPreference {
   id: number
@@ -90,7 +94,6 @@ export interface UserPreference {
   updated_at: string
 }
 
-// ===== 出行清单 =====
 export type ChecklistCategory = '证件' | '衣物' | '电子' | '药品' | '其他'
 export interface ChecklistItem {
   id: number
@@ -109,7 +112,6 @@ export interface ChecklistResult {
   checked_count: number
 }
 
-// ===== 行程优化差异预览 =====
 export interface AttractionChange {
   name: string
   field: string

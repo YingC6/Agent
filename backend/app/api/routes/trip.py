@@ -4,6 +4,7 @@ import json
 import queue
 import threading
 import time
+import uuid
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -39,20 +40,23 @@ def parse_trip_request(request: NaturalLanguageRequest):
 @router.post("/plan", response_model=TripPlanResponse)
 async def plan_trip(request_data: TripRequest, http_request: Request, current_user=Depends(get_optional_user), db: Session = Depends(get_db)):
     started_at = time.time()
+    run_id = uuid.uuid4().hex
     steps = []
 
     def collect(step: dict):
-        steps.append(step)
+        event = {"run_id": run_id, **step}
+        steps.append(event)
 
     try:
         user_id = current_user.id if current_user else None
         cached_plan = get_cached_plan(request_data, user_id)
         if cached_plan:
+            cached_plan = cached_plan.model_copy(update={"source": "cache", "is_fallback": False, "warnings": []})
             collect({"name": "AI结果缓存", "status": "success", "summary": "命中相同旅行需求缓存,直接返回历史生成结果", "duration_ms": 0})
             record = create_trip_record(db, cached_plan, request_data, user_id, source="cache") if user_id else None
             duration_ms = int((time.time() - started_at) * 1000)
             create_generation_log(db, user_id, request_data.free_text_input or "表单生成", request_data.city, "success", steps, duration_ms, trip_id=record.id if record else None)
-            return TripPlanResponse(success=True, message="旅行计划生成成功(缓存)", data=cached_plan)
+            return TripPlanResponse(success=True, message="旅行计划生成成功(缓存)", run_id=run_id, data=cached_plan)
 
         allowed, retry_after = check_plan_rate_limit(user_id, http_request.client.host if http_request.client else "anonymous")
         if not allowed:
@@ -63,14 +67,15 @@ async def plan_trip(request_data: TripRequest, http_request: Request, current_us
         if knowledge_items:
             collect({"name": "知识库检索", "status": "success", "summary": f"匹配到{len(knowledge_items)}条旅行经验", "duration_ms": 0})
         agent = get_trip_planner_agent()
-        trip_plan = agent.plan_trip(request_data, progress_callback=collect, knowledge_context=knowledge_context)
-        set_cached_plan(request_data, trip_plan, user_id)
+        trip_plan = agent.plan_trip(request_data, progress_callback=collect, knowledge_context=knowledge_context, run_id=run_id)
+        if not trip_plan.is_fallback:
+            set_cached_plan(request_data, trip_plan, user_id)
         record = None
         if current_user:
             record = create_trip_record(db, trip_plan, request_data, current_user.id)
         duration_ms = int((time.time() - started_at) * 1000)
         create_generation_log(db, user_id, request_data.free_text_input or "表单生成", request_data.city, "success", steps, duration_ms, trip_id=record.id if record else None)
-        return TripPlanResponse(success=True, message="旅行计划生成成功", data=trip_plan)
+        return TripPlanResponse(success=True, message="旅行计划生成成功", run_id=run_id, data=trip_plan)
     except HTTPException:
         raise
     except Exception as e:
@@ -92,6 +97,7 @@ def stream_plan(http_request: Request, city: str = Query(...), start_date: str =
     )
     user_id = current_user.id if current_user else None
     client_key = http_request.client.host if http_request.client else "anonymous"
+    run_id = uuid.uuid4().hex
 
     def event_generator():
         started_at = time.time()
@@ -100,20 +106,22 @@ def stream_plan(http_request: Request, city: str = Query(...), start_date: str =
         done_marker = object()
 
         def collect(step: dict):
-            steps.append(step)
-            events.put({"type": "step", "data": step})
+            event_data = {"run_id": run_id, **step}
+            steps.append(event_data)
+            events.put({"type": "step", "data": event_data})
 
         def worker():
             worker_db = SessionLocal()
             try:
-                events.put({"type": "step", "data": {"name": "任务初始化", "status": "running", "summary": "开始生成旅行计划", "duration_ms": 0}})
+                events.put({"type": "step", "data": {"run_id": run_id, "name": "任务初始化", "status": "running", "summary": "开始生成旅行计划", "duration_ms": 0, "timestamp_ms": int(time.time() * 1000)}})
                 cached_plan = get_cached_plan(request, user_id)
                 if cached_plan:
+                    cached_plan = cached_plan.model_copy(update={"source": "cache", "is_fallback": False, "warnings": []})
                     collect({"name": "AI结果缓存", "status": "success", "summary": "命中相同旅行需求缓存,直接返回历史生成结果", "duration_ms": 0})
                     record = create_trip_record(worker_db, cached_plan, request, user_id, source="cache") if user_id else None
                     duration_ms = int((time.time() - started_at) * 1000)
                     log = create_generation_log(worker_db, user_id, free_text_input or "流式生成", city, "success", steps, duration_ms, trip_id=record.id if record else None)
-                    events.put({"type": "done", "data": {"plan": cached_plan.model_dump(), "trip_id": record.id if record else None, "log_id": log.id}})
+                    events.put({"type": "done", "data": {"run_id": run_id, "plan": cached_plan.model_dump(), "trip_id": record.id if record else None, "log_id": log.id}})
                     return
                 allowed, retry_after = check_plan_rate_limit(user_id, client_key)
                 if not allowed:
@@ -124,17 +132,18 @@ def stream_plan(http_request: Request, city: str = Query(...), start_date: str =
                 if knowledge_items:
                     collect({"name": "知识库检索", "status": "success", "summary": f"匹配到{len(knowledge_items)}条旅行经验", "duration_ms": 0})
                 agent = get_trip_planner_agent()
-                trip_plan = agent.plan_trip(request, progress_callback=collect, knowledge_context=knowledge_context)
-                set_cached_plan(request, trip_plan, user_id)
+                trip_plan = agent.plan_trip(request, progress_callback=collect, knowledge_context=knowledge_context, run_id=run_id)
+                if not trip_plan.is_fallback:
+                    set_cached_plan(request, trip_plan, user_id)
                 record = None
                 if user_id:
                     record = create_trip_record(worker_db, trip_plan, request, user_id)
                 duration_ms = int((time.time() - started_at) * 1000)
                 log = create_generation_log(worker_db, user_id, free_text_input or "流式生成", city, "success", steps, duration_ms, trip_id=record.id if record else None)
-                events.put({"type": "done", "data": {"plan": trip_plan.model_dump(), "trip_id": record.id if record else None, "log_id": log.id}})
+                events.put({"type": "done", "data": {"run_id": run_id, "plan": trip_plan.model_dump(), "trip_id": record.id if record else None, "log_id": log.id}})
             except Exception as e:
                 create_generation_log(worker_db, user_id, free_text_input or "流式生成", city, "failed", steps, int((time.time() - started_at) * 1000), str(e))
-                events.put({"type": "error", "data": {"message": str(e)}})
+                events.put({"type": "error", "data": {"run_id": run_id, "message": str(e)}})
             finally:
                 worker_db.close()
                 events.put(done_marker)
