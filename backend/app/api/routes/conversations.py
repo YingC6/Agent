@@ -18,6 +18,7 @@ from ...models.schemas import TripPlan, TripRequest
 from ...services.ai_trip_service import optimize_trip_plan
 from ...services.amap_service import get_amap_service
 from ...services.context_builder import build_conversation_context
+from ...services.knowledge_agent import run_agentic_retrieval
 from ...services.llm_service import get_llm
 from ...services.memory_service import remember_preferences_from_message
 from ...services.plan_diff_service import compute_plan_diff
@@ -115,6 +116,33 @@ def _tool_context(intent: ConversationIntent, content: str, plan: TripPlan) -> t
         steps.append({"name": "实时查询工具", "status": "failed", "summary": "工具暂不可用，已基于当前行程继续处理", "duration_ms": 0})
         logger.warning("conversation_tool_failed intent={} error={}", intent.name, str(error))
         return "实时工具查询失败，请避免把未验证信息当作事实。", steps, []
+
+
+# 纯寒暄类消息不触发知识检索,避免给简短问候增加一次检索开销
+CHITCHAT_ONLY = {"你好", "hi", "hello", "嗨", "在吗", "谢谢", "再见", "好的"}
+
+
+def _should_retrieve_knowledge(content: str) -> bool:
+    text = content.strip().lower()
+    return len(text) >= 4 and text not in CHITCHAT_ONLY
+
+
+def _knowledge_context(content: str, plan: TripPlan, db: Session) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
+    """对话场景的知识检索:限制单轮并跳过LLM重排,避免拖慢聊天响应。"""
+    if not _should_retrieve_knowledge(content):
+        return "", [], []
+    request = _request_from_plan(plan).model_copy(update={"free_text_input": content})
+    try:
+        retrieval = run_agentic_retrieval(db, request, max_rounds=1, rerank=False)
+    except Exception as error:
+        logger.warning("conversation_knowledge_failed error={}", str(error))
+        return "", [], []
+    refs = retrieval.refs()
+    if not refs:
+        return "", [], []
+    steps = [{"name": "知识库检索", "status": "success", "summary": f"检索到{len(refs)}条相关攻略", "duration_ms": 0}]
+    results = [{"type": "knowledge", "title": "知识库参考", "data": refs}]
+    return "知识库参考(仅作参考,事实以实时查询为准):\n" + retrieval.context, steps, results
 
 
 def _append_message(db: Session, conversation: Conversation, role: str, content: str, version_id: int | None, task_status: str, task_steps: list[dict[str, Any]], started_at: float, error_message: str = "") -> ConversationMessage:
@@ -219,6 +247,11 @@ def _process_message(conversation_id: int, request: ConversationMessageRequest, 
             return result, intent
         remember_preferences_from_message(db, current_user.id, request.content)
         tool_context, task_steps, query_results = _tool_context(intent, request.content, plan)
+        knowledge_context = ""
+        if intent.name == "answer":
+            knowledge_context, knowledge_steps, knowledge_results = _knowledge_context(request.content, plan, db)
+            task_steps.extend(knowledge_steps)
+            query_results.extend(knowledge_results)
         if intent.name == "modify":
             candidate = optimize_trip_plan(plan, f"{request.content}\n{tool_context}")
             validation = validate_plan_execution(candidate, _request_from_plan(plan))
@@ -232,7 +265,7 @@ def _process_message(conversation_id: int, request: ConversationMessageRequest, 
             task_steps.append({"name": "候选行程生成", "status": "success", "summary": diff["summary"], "duration_ms": 0})
             pending_change, version_id = {"plan": candidate.model_dump(), "diff": diff}, None
         else:
-            prompt = "你是旅行行程助手。基于当前计划、用户长期偏好和最近对话回答用户。实时查询结果仅作参考，不能编造事实。请使用中文，简洁回答。\n" + build_conversation_context(conversation, plan, db=db) + "\n" + tool_context + "\n用户最新请求: " + request.content
+            prompt = "你是旅行行程助手。基于当前计划、用户长期偏好和最近对话回答用户。实时查询结果仅作参考，不能编造事实。请使用中文，简洁回答。\n" + build_conversation_context(conversation, plan, db=db) + "\n" + tool_context + "\n" + knowledge_context + "\n用户最新请求: " + request.content
             response = SimpleAgent(name="行程多轮对话Agent", llm=get_llm(), system_prompt="请使用中文，简洁、准确地协助旅行计划调整。").run(prompt)
             task_steps.append({"name": "对话回答", "status": "success", "summary": "已生成回复", "duration_ms": 0})
             pending_change, version_id = None, version.id if version else None
@@ -271,8 +304,13 @@ def stream_message(conversation_id: int, request: ConversationMessageRequest, cu
             conversation, trip, version, plan, _, _ = _load_message_context(conversation_id, request, current_user, db)
             remember_preferences_from_message(db, current_user.id, request.content)
             tool_context, task_steps, query_results = _tool_context(intent, request.content, plan)
+            knowledge_context = ""
+            if intent.name == "answer":
+                knowledge_context, knowledge_steps, knowledge_results = _knowledge_context(request.content, plan, db)
+                task_steps.extend(knowledge_steps)
+                query_results.extend(knowledge_results)
             yield _sse("meta", {"intent": intent.model_dump(), "query_results": query_results})
-            prompt = "你是旅行行程助手。基于当前计划、用户长期偏好和最近对话回答用户。实时查询结果仅作参考，不能编造事实。请使用中文，简洁回答。\n" + build_conversation_context(conversation, plan, db=db) + "\n" + tool_context + "\n用户最新请求: " + request.content
+            prompt = "你是旅行行程助手。基于当前计划、用户长期偏好和最近对话回答用户。实时查询结果仅作参考，不能编造事实。请使用中文，简洁回答。\n" + build_conversation_context(conversation, plan, db=db) + "\n" + tool_context + "\n" + knowledge_context + "\n用户最新请求: " + request.content
             chunks: list[str] = []
             for chunk in _stream_agent_response(prompt):
                 chunks.append(chunk)

@@ -157,8 +157,16 @@ trip_module.get_trip_planner_agent = lambda: FakeHttpPlanner()
 trip_module.get_cached_plan = lambda request, user_id: None
 trip_module.check_plan_rate_limit = lambda user_id, client_key: (True, 0)
 trip_module.set_cached_plan = lambda request, plan, user_id: None
-trip_module.search_relevant_knowledge = lambda db, request: []
-trip_module.build_knowledge_context = lambda items: ""
+
+
+class FakeRetrieval:
+    context = ""
+
+    def refs(self):
+        return []
+
+
+trip_module.run_agentic_retrieval = lambda db, request, progress=None: FakeRetrieval()
 
 Base.metadata.create_all(bind=engine)
 db = SessionLocal()

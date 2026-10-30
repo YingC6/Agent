@@ -15,7 +15,7 @@ from ...database import SessionLocal, get_db
 from ...models.schemas import TripPlan, TripPlanResponse, TripRequest
 from ...services.ai_guard_service import check_plan_rate_limit, get_cached_plan, set_cached_plan
 from ...services.ai_trip_service import optimize_trip_plan, parse_natural_language
-from ...services.knowledge_service import build_knowledge_context, search_relevant_knowledge
+from ...services.knowledge_agent import run_agentic_retrieval
 from ...services.plan_diff_service import compute_plan_diff
 from ...services.trip_repository import create_generation_log, create_trip_record, trip_to_dict
 
@@ -62,12 +62,10 @@ async def plan_trip(request_data: TripRequest, http_request: Request, current_us
         if not allowed:
             raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=f"生成过于频繁,请{retry_after}秒后再试")
 
-        knowledge_items = search_relevant_knowledge(db, request_data)
-        knowledge_context = build_knowledge_context(knowledge_items)
-        if knowledge_items:
-            collect({"name": "知识库检索", "status": "success", "summary": f"匹配到{len(knowledge_items)}条旅行经验", "duration_ms": 0})
+        retrieval = run_agentic_retrieval(db, request_data, progress=collect)
         agent = get_trip_planner_agent()
-        trip_plan = agent.plan_trip(request_data, progress_callback=collect, knowledge_context=knowledge_context, run_id=run_id)
+        trip_plan = agent.plan_trip(request_data, progress_callback=collect, knowledge_context=retrieval.context, run_id=run_id)
+        trip_plan = trip_plan.model_copy(update={"knowledge_refs": retrieval.refs()})
         if not trip_plan.is_fallback:
             set_cached_plan(request_data, trip_plan, user_id)
         record = None
@@ -127,12 +125,10 @@ def stream_plan(http_request: Request, city: str = Query(...), start_date: str =
                 if not allowed:
                     events.put({"type": "error", "data": {"message": f"生成过于频繁,请{retry_after}秒后再试"}})
                     return
-                knowledge_items = search_relevant_knowledge(worker_db, request)
-                knowledge_context = build_knowledge_context(knowledge_items)
-                if knowledge_items:
-                    collect({"name": "知识库检索", "status": "success", "summary": f"匹配到{len(knowledge_items)}条旅行经验", "duration_ms": 0})
+                retrieval = run_agentic_retrieval(worker_db, request, progress=collect)
                 agent = get_trip_planner_agent()
-                trip_plan = agent.plan_trip(request, progress_callback=collect, knowledge_context=knowledge_context, run_id=run_id)
+                trip_plan = agent.plan_trip(request, progress_callback=collect, knowledge_context=retrieval.context, run_id=run_id)
+                trip_plan = trip_plan.model_copy(update={"knowledge_refs": retrieval.refs()})
                 if not trip_plan.is_fallback:
                     set_cached_plan(request, trip_plan, user_id)
                 record = None

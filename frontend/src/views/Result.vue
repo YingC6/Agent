@@ -82,6 +82,12 @@
                   <span class="info-label">💡 建议:</span>
                   <span class="info-value">{{ tripPlan.overall_suggestions }}</span>
                 </div>
+                <div v-if="tripPlan.knowledge_refs?.length" class="info-item">
+                  <span class="info-label">📚 参考攻略:</span>
+                  <span class="info-value">
+                    {{ (tripPlan.knowledge_refs || []).map((item) => item.title).join('、') }}
+                  </span>
+                </div>
               </div>
             </a-card>
 
@@ -378,11 +384,14 @@
         </div>
         <div v-if="streamingContent" class="chat-message assistant streaming">{{ streamingContent }}<span class="streaming-cursor">▋</span></div>
       </div>
-      <a-card v-if="conversationQueryResults.length" size="small" title="实时查询结果" class="conversation-query-results">
+      <a-card v-if="conversationQueryResults.length" size="small" title="查询与参考结果" class="conversation-query-results">
         <div v-for="result in conversationQueryResults" :key="`${result.type}-${result.title}`" class="query-result">
           <strong>{{ result.title }}</strong>
           <template v-if="result.type === 'transport'">
             <div>距离 {{ formatDistance(result.data) }} · 预计 {{ formatDuration(result.data) }} · {{ formatRouteType(result.data) }}</div>
+          </template>
+          <template v-else-if="result.type === 'knowledge'">
+            <div v-for="ref in result.data" :key="ref.id">{{ ref.title }}<span v-if="ref.city"> · {{ ref.city }}</span> · 匹配分 {{ ref.score }}</div>
           </template>
           <template v-else-if="Array.isArray(result.data)">
             <div v-for="poi in result.data" :key="poi.poi_id || poi.name">{{ poi.name }}<span v-if="poi.address"> · {{ poi.address }}</span></div>

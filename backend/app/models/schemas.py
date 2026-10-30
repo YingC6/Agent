@@ -164,6 +164,7 @@ class TripPlan(BaseModel):
     source: str = Field(default="ai", description="计划来源")
     is_fallback: bool = Field(default=False, description="是否为降级计划")
     warnings: List[str] = Field(default=[], description="计划警告")
+    knowledge_refs: List[dict] = Field(default=[], description="本次采用的知识库资料来源")
 
 
     @model_validator(mode="after")

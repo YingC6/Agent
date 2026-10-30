@@ -43,7 +43,8 @@ export interface DayPlan {
   plan_b?: string
 }
 export interface WeatherInfo { date: string; day_weather: string; night_weather: string; day_temp: number; night_temp: number; wind_direction: string; wind_power: string }
-export interface TripPlan { city: string; start_date: string; end_date: string; days: DayPlan[]; weather_info: WeatherInfo[]; overall_suggestions: string; budget?: Budget; source?: string; is_fallback?: boolean; warnings?: string[] }
+export interface KnowledgeRef { id: number; title: string; city: string; score: number; source: string; chunk_index?: number | null }
+export interface TripPlan { city: string; start_date: string; end_date: string; days: DayPlan[]; weather_info: WeatherInfo[]; overall_suggestions: string; budget?: Budget; source?: string; is_fallback?: boolean; warnings?: string[]; knowledge_refs?: KnowledgeRef[] }
 export interface TripFormData { city: string; start_date: string; end_date: string; travel_days: number; transportation: string; accommodation: string; preferences: string[]; free_text_input: string }
 export interface TripPlanResponse { success: boolean; message: string; run_id?: string; data?: TripPlan }
 export interface TripRating { id: number; trip_id: number; rating: number; comment: string }
@@ -56,7 +57,7 @@ export interface TripRecord { id: number; title: string; city: string; start_dat
 export interface ConversationMessage { id: number; role: 'user' | 'assistant' | string; content: string; version_id?: number; task_status: 'running' | 'completed' | 'failed' | string; task_steps: AgentStep[]; error_message?: string; duration_ms: number; created_at: string }
 export type ConversationIntentName = 'confirm' | 'cancel' | 'modify' | 'weather' | 'restaurant_search' | 'transport_search' | 'poi_search' | 'answer'
 export interface ConversationIntent { name: ConversationIntentName; query: string; origin: string; destination: string; route_type: 'walking' | 'driving' | 'transit' }
-export interface ConversationQueryResult { type: 'weather' | 'restaurant' | 'transport' | 'poi'; title: string; data: any }
+export interface ConversationQueryResult { type: 'weather' | 'restaurant' | 'transport' | 'poi' | 'knowledge'; title: string; data: any }
 export interface Conversation { id: number; trip_id?: number; current_version_id?: number; title: string; summary: string; summarized_message_count: number; versions?: TripVersion[]; messages: ConversationMessage[]; created_at: string; updated_at: string }
 export interface PendingPlanChange { plan: TripPlan; diff: { summary: string; [key: string]: unknown } }
 export interface ConversationReply { conversation: Conversation; message: ConversationMessage; trip: TripRecord; pending_change?: PendingPlanChange | null; intent: ConversationIntent; query_results: ConversationQueryResult[] }

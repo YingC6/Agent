@@ -137,6 +137,15 @@ def split_knowledge_chunks(item: KnowledgeItem, chunk_size: int = 480, chunk_ove
     return chunks
 
 
+@dataclass(frozen=True)
+class KnowledgeHit:
+    """一条检索命中:知识条目 + 实际命中的分块 + 综合得分 + 召回来源。"""
+    item: KnowledgeItem
+    chunk: KnowledgeChunk | None
+    score: float
+    source: str
+
+
 def build_retrieval_query(request: TripRequest) -> str:
     preferences = "、".join(request.preferences) if request.preferences else "无"
     return f"目的地：{request.city}；天数：{request.travel_days}；偏好：{preferences}；补充需求：{request.free_text_input or '无'}"
@@ -166,96 +175,111 @@ def rerank_knowledge_with_llm(request: TripRequest, candidates: list[KnowledgeIt
         return candidates[:limit]
 
 
-def search_relevant_knowledge(db: Session, request: TripRequest, limit: int = 3) -> list[KnowledgeItem]:
-    """混合检索:规则召回 + FAISS 向量检索 + LLM 语义重排。
+# 向量相似度折算为与规则分可比的综合分
+VECTOR_WEIGHT = 30.0
+# 向量相似度低于该值时保留规则召回挑出的分块
+VECTOR_CHUNK_THRESHOLD = 0.45
 
-    检索流程:
-    1. 规则评分召回 top-8 候选(城市/天数/主题/关键词匹配)
-    2. FAISS 向量检索补充语义相似分块(若嵌入服务可用)
-    3. 合并去重后由 LLM 重排选出 top-3
-    4. 嵌入服务不可用时自动降级为纯规则检索
+
+def _pick_rule_chunk(item: KnowledgeItem, terms: set[str]) -> KnowledgeChunk | None:
+    """规则召回时挑选与请求词重合度最高的分块,避免注入无关片段。"""
+    chunks = split_knowledge_chunks(item)
+    if not chunks:
+        return None
+    return max(chunks, key=lambda chunk: sum(1 for term in terms if term in chunk.content))
+
+
+def retrieve_knowledge(
+    db: Session,
+    request: TripRequest,
+    limit: int = 3,
+    query: str | None = None,
+    rerank: bool = True,
+) -> list[KnowledgeHit]:
+    """混合检索:规则评分 + FAISS 向量召回,直接返回命中分块。
+
+    与旧实现的关键差异:命中的分块会原样传给上下文构建,不再按条目重新切分,
+    保证注入 LLM 的片段就是打分命中的那一段。
+    rerank=False 时跳过 LLM 重排,用于对话这类对延迟敏感的场景。
     """
     items = db.scalars(select(KnowledgeItem)).all()
+    if not items:
+        return []
 
-    # 阶段1: 规则评分召回
+    request_terms = expand_terms(request.preferences, request.free_text_input or "")
+    hits: dict[int, KnowledgeHit] = {}
+
+    # 阶段1: 规则评分召回(城市/天数/主题/关键词)
     scored = [(score_knowledge(item, request), item) for item in items]
-    matched = [(score, item) for score, item in scored if score > 0]
-    matched.sort(key=lambda pair: pair[0], reverse=True)
-    rule_candidates = [item for _, item in matched[:8]]
+    matched = sorted((pair for pair in scored if pair[0] > 0), key=lambda pair: pair[0], reverse=True)[:8]
+    for rule_score, item in matched:
+        hits[item.id] = KnowledgeHit(
+            item=item,
+            chunk=_pick_rule_chunk(item, request_terms),
+            score=float(rule_score),
+            source="rule",
+        )
 
-    # 阶段2: FAISS 向量检索补充语义候选
-    vector_candidates = _vector_recall(db, items, request, top_k=8)
-
-    # 合并去重:规则候选 + 向量候选
-    candidate_ids = set()
-    merged_candidates: list[KnowledgeItem] = []
-    for item in rule_candidates + vector_candidates:
-        if item.id not in candidate_ids:
-            candidate_ids.add(item.id)
-            merged_candidates.append(item)
+    # 阶段2: 向量召回补充语义候选,按条目合并取最高分分块
+    for vector_score, chunk in _vector_recall(items, query or build_retrieval_query(request), top_k=8):
+        existing = hits.get(chunk.item.id)
+        combined = vector_score * VECTOR_WEIGHT + (existing.score if existing else 0.0)
+        keep_rule_chunk = existing is not None and existing.chunk is not None and vector_score < VECTOR_CHUNK_THRESHOLD
+        hits[chunk.item.id] = KnowledgeHit(
+            item=existing.item if existing else chunk.item,
+            chunk=existing.chunk if keep_rule_chunk else chunk,
+            score=combined,
+            source=f"{existing.source}+vector" if existing else "vector",
+        )
 
     # 阶段3: LLM 语义重排
-    if merged_candidates:
-        result = rerank_knowledge_with_llm(request, merged_candidates, limit)
+    candidates = sorted(hits.values(), key=lambda hit: hit.score, reverse=True)[:8]
+    if not candidates:
+        return []
+    by_id = {hit.item.id: hit for hit in candidates}
+    if rerank:
+        reranked = rerank_knowledge_with_llm(request, [hit.item for hit in candidates], limit)
+        result = [by_id[item.id] for item in reranked if item.id in by_id][:limit]
     else:
-        result = []
-    for item in result:
-        item.usage_count += 1
+        result = candidates[:limit]
+    for hit in result:
+        hit.item.usage_count += 1
     if result:
         db.commit()
     return result
 
 
-def _vector_recall(
-    db: Session,
-    items: list[KnowledgeItem],
-    request: TripRequest,
-    top_k: int = 8,
-) -> list[KnowledgeItem]:
-    """FAISS 向量检索:返回与请求语义相似的知识条目。
-
-    嵌入服务不可用或索引构建失败时返回空列表,触发降级。
-    """
+def _vector_recall(items: list[KnowledgeItem], query: str, top_k: int = 8) -> list[tuple[float, KnowledgeChunk]]:
+    """FAISS 向量召回,返回(相似度, 命中分块)。嵌入服务不可用时返回空列表触发降级。"""
     from .vector_store import get_vector_store
 
     if not items:
         return []
-
     vector_store = get_vector_store()
-    # 知识库变更时重建索引
     if vector_store.needs_rebuild(items) or not vector_store.is_ready:
-        built = vector_store.build_index(items)
-        if not built:
+        if not vector_store.build_index(items):
             return []
-
-    query = build_retrieval_query(request)
-    results = vector_store.search(query, top_k=top_k)
-    if not results:
-        return []
-
-    # 将分块结果映射回知识条目,按最高分去重
-    item_by_id = {item.id: item for item in items}
-    seen: dict[int, float] = {}
-    for result in results:
-        item_id = result.chunk.item.id
-        if item_id not in seen or result.score > seen[item_id]:
-            seen[item_id] = result.score
-    ranked_ids = sorted(seen.keys(), key=lambda iid: seen[iid], reverse=True)
-    return [item_by_id[iid] for iid in ranked_ids if iid in item_by_id]
+    return [(result.score, result.chunk) for result in vector_store.search(query, top_k=top_k)]
 
 
-def build_knowledge_context(items: list[KnowledgeItem]) -> str:
-    if not items:
+def search_relevant_knowledge(db: Session, request: TripRequest, limit: int = 3) -> list[KnowledgeItem]:
+    """只要条目本体时使用的兼容入口(如后台知识库检索调试接口)。"""
+    return [hit.item for hit in retrieve_knowledge(db, request, limit=limit)]
+
+
+def build_knowledge_context(hits: list[KnowledgeHit]) -> str:
+    """把命中分块拼成 LLM 上下文,带上来源与匹配分便于溯源。"""
+    if not hits:
         return ""
     parts = []
-    for item in items:
-        chunks = split_knowledge_chunks(item)
-        for chunk in chunks[:2]:
-            parts.append(
-                f"参考资料：{item.title}（片段{chunk.index + 1}）\n"
-                f"城市：{item.city}\n主题：{item.themes or '无'}\n内容：{chunk.content}"
-            )
+    for hit in hits:
+        content = hit.chunk.content if hit.chunk else hit.item.content[:480]
+        parts.append(
+            f"参考资料：{hit.item.title}（匹配分 {hit.score:.1f}，来源 {hit.source}）\n"
+            f"城市：{hit.item.city}\n主题：{hit.item.themes or '无'}\n内容：{content}"
+        )
     return "\n\n".join(parts)
+
 
 def knowledge_to_dict(item: KnowledgeItem) -> dict[str, Any]:
     return {
