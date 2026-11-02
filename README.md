@@ -12,7 +12,7 @@
 - 🔄 **Planning-Review 双阶段架构**: 规划 Agent 生成后由审核 Agent 检查,不通过自动修正(受最大轮次约束)
 - 🕘 **时间表排程**: 基于景点游览时长与通勤时长确定性生成每日时间轴
 - ❓ **主动澄清需求**: 偏好缺失或行程过长时先向用户提问,结果随行程返回
-- 🌐 **三源融合搜索**: 站内攻略 + 高德实时数据 + 联网搜索(Tavily),按 30 天半衰期加权,冲突以高德为准
+- 🌐 **三源融合搜索**: 站内攻略 + 高德实时数据 + 联网搜索(Tavily),按发布时间做 30 天半衰期时效衰减,冲突以高德为准
 - 🏆 **条件触发择优**: 行程自评分低于阈值时并行生成备选并一次性评审择优,控制 LLM 成本
 
 ### 平台功能
@@ -23,13 +23,13 @@
 - 🎯 **用户偏好管理**: 结构化长期记忆(类型 + 语义槽位),新偏好自动覆盖旧值,读取时按 30 天半衰期衰减
 - 📝 **旅行清单**: AI 生成 + 手动编辑,按行程关联
 - 💬 **多轮对话优化**: 会话持久化 + 上下文预算裁剪 + 滚动摘要压缩,长对话保留关键决策
-- 🗺️ **行程地图可视化**: 按天着色绘制高德真实路线,标记分级展示,视野自适应且限制最大缩放
+- 🗺️ **行程地图可视化**: 按天着色绘制高德真实路线并配编号标记,视野自适应且限制最大缩放
 
 ### 工程能力
-- 🚀 **SSE 流式响应**: 行程生成步骤实时推送到前端
+- 🚀 **SSE 流式响应**: 行程生成与对话回复步骤实时推送到前端
 - 🔒 **接口限流**: 同一用户/游客 60 秒内最多 3 次(缓存命中不消耗次数)
 - 💾 **Redis 缓存**: POI 搜索结果(TTL 3600s) + AI 行程结果(TTL 1800s)
-- 🛡️ **ToolGovernance**: 工具调用超时、重试、限流治理
+- 🛡️ **ToolGovernance**: 工具调用 45s 超时 + 1 次重试 + 单工具调用上限治理
 - 🛣️ **路线增强**: 按名称重新地理编码景点坐标,调用高德计算真实距离/时长并返回折线;空路线时按直线距离兜底估值
 
 ## 🏗️ 技术栈
@@ -112,11 +112,16 @@ helloagents-trip-planner/
 │   │   │   ├── agent_tools.py         # 平台行为工具(收藏/打卡/点评)
 │   │   │   ├── route_service.py       # 路线规划与折线兜底
 │   │   │   ├── plan_diff_service.py   # 行程差异预览
+│   │   │   ├── plan_validator.py      # 行程执行校验
 │   │   │   ├── checklist_service.py   # 清单生成
 │   │   │   ├── memory_service.py      # 长期记忆合并/失效/衰减
-│   │   │   ├── ai_guard_service.py    # 限流/缓存
+│   │   │   ├── ai_guard_service.py    # 限流/缓存入口
+│   │   │   ├── cache_service.py       # Redis 缓存与限流原子操作
 │   │   │   ├── trip_repository.py     # 行程持久化
+│   │   │   ├── security.py            # JWT 与密码哈希
 │   │   │   ├── amap_service.py        # 高德 API 封装
+│   │   │   ├── unsplash_service.py    # 景点图片
+│   │   │   ├── logging_config.py      # 结构化日志
 │   │   │   └── llm_service.py         # LLM 实例管理
 │   │   ├── models/
 │   │   │   ├── schemas.py          # Pydantic 模型
@@ -152,7 +157,8 @@ helloagents-trip-planner/
 ### 前提条件
 
 - Python 3.10+
-- Node.js 16+
+- Node.js 18+(Vite 6 要求)
+- uv / uvx(后端通过 `uvx` 启动高德 MCP 服务)
 - 高德地图 API 密钥(**Web 服务 API 类型**,用于后端 MCP 调用)
 - LLM API 密钥(阿里云千问 / DeepSeek / OpenAI 等兼容接口)
 - Redis(可选,未安装自动降级为无缓存模式)
@@ -169,19 +175,28 @@ cd backend
 conda create -n agent python=3.10
 conda activate agent
 pip install -r requirements.txt
+# 确认 uvx 可用(MCP 通过 uvx 启动 amap-mcp-server)
+uvx --version
 ```
 
 3. 配置环境变量
 ```bash
 cp .env.example .env
-# 编辑 .env 文件,填入:
-#   LLM_API_KEY        - LLM 服务密钥
-#   LLM_BASE_URL       - LLM 服务地址
-#   LLM_MODEL_ID       - 模型名称
-#   LLM_TIMEOUT=300    - 行程生成需要较长超时
-#   AMAP_API_KEY       - 高德地图 Web 服务 Key
-#   TAVILY_API_KEY     - 可选,联网搜索密钥,不配置则自动跳过
-#   WEB_SEARCH_DEFAULT_MODE=auto - 联网搜索默认模式: off/auto/on
+# 编辑 .env 文件,至少填入:
+#   LLM_MODEL_ID / LLM_API_KEY / LLM_BASE_URL - LLM 配置
+#   LLM_TIMEOUT=300                           - 行程生成需要较长超时
+#   AMAP_API_KEY / AMAP_SECURITY_KEY          - 高德地图 Web 服务 Key
+#   DATABASE_URL=sqlite:///./trip_planner.db  - 默认 SQLite,可换 PostgreSQL
+#   REDIS_URL / CACHE_TTL_SECONDS=3600        - 可选,Redis 未启动自动降级
+#   AI_PLAN_CACHE_TTL_SECONDS=1800            - AI 行程缓存 TTL
+#   PLAN_RATE_LIMIT_COUNT=3 / PLAN_RATE_LIMIT_WINDOW_SECONDS=60 - 用户限流
+#   MAX_REVIEW_ROUNDS=1                       - 审核-修正最大轮次
+#   PLAN_CANDIDATE_MIN_SCORE=75 / PLAN_CANDIDATE_COUNT=2 - 条件择优阈值与候选数
+#   TAVILY_API_KEY                            - 可选,不配置则自动跳过联网搜索
+#   WEB_SEARCH_DEFAULT_MODE=auto              - 联网搜索默认模式: off/auto/on
+#   JWT_SECRET_KEY / JWT_EXPIRE_MINUTES       - 认证密钥与有效期
+#   HOST=0.0.0.0 / PORT=8000 / CORS_ORIGINS / LOG_LEVEL - 服务与日志配置
+#   UNSPLASH_ACCESS_KEY / UNSPLASH_SECRET_KEY - 可选,景点图片
 ```
 
 4. 启动后端服务
@@ -205,7 +220,10 @@ npm install
 3. 配置环境变量
 ```bash
 cp .env.example .env
-# 填入高德地图 Web 端 JS API Key(用于前端地图组件)
+#   VITE_API_BASE_URL=http://localhost:8000 - 后端 API 地址
+#   VITE_AMAP_WEB_KEY                       - 高德 Web 服务 Key
+#   VITE_AMAP_WEB_JS_KEY                    - 高德 Web 端 JS API Key(地图组件)
+#   VITE_AMAP_SECURITY_KEY                  - 高德安全密钥(jscode)
 ```
 
 4. 启动开发服务器
@@ -275,8 +293,8 @@ results = vector_store.search(query, top_k=8)  # 内积=余弦相似度
 ### 多智能体并行调研
 
 ```python
-# 景点/天气/酒店 Agent 使用独立 MCPTool 实例,避免线程安全问题
-with ThreadPoolExecutor(max_workers=3) as executor:
+# 景点/天气/酒店(可选联网)Agent 使用独立 MCPTool 实例,按任务数动态并发
+with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
     futures = {
         executor.submit(governance.run_agent, tool_name, agent, query): key
         for key, (name, agent, query, _) in tasks.items()
@@ -288,16 +306,20 @@ with ThreadPoolExecutor(max_workers=3) as executor:
 启动后端后访问 `http://localhost:8000/docs` 查看完整 API 文档。
 
 主要端点:
+- `POST /api/trip/parse` - 解析自然语言行程需求
 - `POST /api/trip/plan` - 生成旅行计划
 - `GET /api/trip/plan/stream` - SSE 流式生成
 - `POST /api/trip/optimize` - 优化行程(返回差异预览)
 - `POST /api/conversations` - 创建/恢复对话会话
 - `POST /api/conversations/{id}/messages` - 发送对话消息
+- `POST /api/conversations/{id}/messages/stream` - SSE 流式对话
+- `GET /api/trips` / `GET /api/trips/{id}` - 历史行程
+- `POST /api/trips/{id}/rating` - 行程评分
 - `GET /api/preferences` - 用户偏好管理
-- `POST /api/trips/{id}/checklist` - 旅行清单
+- `GET /api/trips/{id}/checklist` / `POST /api/trips/{id}/checklist` - 旅行清单
 - `GET /api/poi/search` - 地点搜索
 - `GET /api/community/posts` - 社区帖子
-- `GET /api/knowledge/items` - 知识库(管理员)
+- `GET /api/knowledge` - 知识库(管理员)
 
 ## 🤝 贡献指南
 
