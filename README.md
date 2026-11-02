@@ -63,6 +63,7 @@ helloagents-trip-planner/
 │   │   │   ├── registry.py        # 角色注册表
 │   │   │   ├── parsers.py         # LLM 输出 JSON 解析
 │   │   │   ├── prompts.py         # 各角色提示词
+│   │   │   ├── trip_planner_agent.py # 多智能体装配与阶段串联(对外入口)
 │   │   │   └── capabilities/
 │   │   │       ├── research.py    # 调研采集能力
 │   │   │       └── trip.py        # 规划/审核/修正能力
