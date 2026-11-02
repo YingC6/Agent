@@ -58,8 +58,29 @@
 helloagents-trip-planner/
 ├── backend/                        # 后端服务
 │   ├── app/
-│   │   ├── agents/                # 多智能体系统
-│   │   │   └── trip_planner_agent.py
+│   │   ├── agents/                # Agent 层:只做 LLM 交互与结构化输出
+│   │   │   ├── runtime.py         # Agent 运行时(单 Agent 工具循环)
+│   │   │   ├── registry.py        # 角色注册表
+│   │   │   ├── parsers.py         # LLM 输出 JSON 解析
+│   │   │   ├── prompts.py         # 各角色提示词
+│   │   │   └── capabilities/
+│   │   │       ├── research.py    # 调研采集能力
+│   │   │       └── trip.py        # 规划/审核/修正能力
+│   │   ├── domain/                # 领域层:纯确定性逻辑
+│   │   │   ├── contracts.py       # 黑板共享状态与类型化契约
+│   │   │   ├── scheduler.py       # 行程时间表排程
+│   │   │   ├── clarification.py   # 主动澄清规则
+│   │   │   ├── scoring.py         # 行程自评分
+│   │   │   ├── search_policy.py   # 联网搜索三态策略
+│   │   │   ├── sources.py         # 多源信息融合
+│   │   │   ├── fallback.py        # 兜底行程
+│   │   │   └── validators/        # 契约与执行校验
+│   │   ├── workflow/              # 工作流层:拓扑与接线
+│   │   │   ├── graph.py           # LangGraph 节点与边
+│   │   │   ├── nodes.py           # 节点实现
+│   │   │   ├── state.py           # 共享状态定义
+│   │   │   ├── fanout.py          # 并行执行与确定性汇聚
+│   │   │   └── emit.py            # 节点事件推送
 │   │   ├── api/
 │   │   │   ├── main.py
 │   │   │   ├── deps.py            # 依赖注入(认证、DB)
@@ -75,21 +96,28 @@ helloagents-trip-planner/
 │   │   │       ├── knowledge.py   # 知识库管理
 │   │   │       ├── auth.py        # 认证
 │   │   │       └── logs.py        # 生成日志
-│   │   ├── services/
-│   │   │   ├── agent_workflow.py     # LangGraph 工作流
-│   │   │   ├── vector_store.py       # FAISS 向量存储
-│   │   │   ├── embedding_service.py  # 嵌入服务
-│   │   │   ├── knowledge_service.py  # 知识库混合检索
-│   │   │   ├── tool_governance.py    # 工具治理
-│   │   │   ├── route_service.py      # 路线规划
-│   │   │   ├── plan_diff_service.py  # 行程差异预览
-│   │   │   ├── checklist_service.py  # 清单生成
-│   │   │   ├── memory_service.py     # 长期记忆
-│   │   │   ├── ai_guard_service.py   # 限流/缓存
-│   │   │   ├── ai_trip_service.py    # 行程解析/优化
-│   │   │   ├── trip_repository.py    # 行程持久化
-│   │   │   ├── amap_service.py       # 高德 API 封装
-│   │   │   └── llm_service.py        # LLM 实例管理
+│   │   ├── services/                # 服务层:编排与外部集成
+│   │   │   ├── ai_trip_service.py     # 行程解析/生成/优化
+│   │   │   ├── revision_service.py    # 行程修正
+│   │   │   ├── plan_candidate_service.py # 条件多候选生成与择优
+│   │   │   ├── itinerary_service.py   # 时间表与路线装配
+│   │   │   ├── context_builder.py     # 对话上下文预算与投影
+│   │   │   ├── summary_service.py     # 对话滚动摘要压缩
+│   │   │   ├── web_search_service.py  # 联网搜索(Tavily)
+│   │   │   ├── knowledge_agent.py     # Agentic 知识检索
+│   │   │   ├── vector_store.py        # FAISS 向量存储
+│   │   │   ├── embedding_service.py   # 嵌入服务
+│   │   │   ├── knowledge_service.py   # 知识库混合检索
+│   │   │   ├── tool_governance.py     # 工具治理与重试
+│   │   │   ├── agent_tools.py         # 平台行为工具(收藏/打卡/点评)
+│   │   │   ├── route_service.py       # 路线规划与折线兜底
+│   │   │   ├── plan_diff_service.py   # 行程差异预览
+│   │   │   ├── checklist_service.py   # 清单生成
+│   │   │   ├── memory_service.py      # 长期记忆合并/失效/衰减
+│   │   │   ├── ai_guard_service.py    # 限流/缓存
+│   │   │   ├── trip_repository.py     # 行程持久化
+│   │   │   ├── amap_service.py        # 高德 API 封装
+│   │   │   └── llm_service.py         # LLM 实例管理
 │   │   ├── models/
 │   │   │   ├── schemas.py          # Pydantic 模型
 │   │   │   └── db_models.py        # SQLAlchemy 模型
