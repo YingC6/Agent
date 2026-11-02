@@ -17,7 +17,7 @@ from loguru import logger
 # ============ Part A: LangGraph 工作流级验证 ============
 
 from app.models.schemas import Attraction, DayPlan, Location, TripPlan, TripRequest
-from app.services.agent_workflow import run_travel_workflow
+from app.workflow.graph import run_travel_workflow
 
 request = TripRequest(
     city="北京",
@@ -58,21 +58,21 @@ class FakePlanner:
         self.optimize_calls = 0
         self.plan = plan or make_plan()
 
-    def research_phase(self, request, emit):
+    def research_phase(self, request, emit, memory_context=""):
         emit("景点搜索Agent", "success", "找到3个景点")
         return {"attractions": "故宫 天坛", "weather": "晴", "hotels": "某酒店"}
 
-    def generate_phase(self, request, tool_results, knowledge_context, emit):
+    def generate_phase(self, request, research, knowledge_context, emit, memory_context=""):
         emit("行程规划Agent", "success", "已生成行程")
         return self.plan
 
-    def review_phase(self, plan, request, round_index, emit):
+    def review_phase(self, plan, request, round_index, emit, memory_context=""):
         self.review_calls += 1
         passed = self.review_results[min(self.review_calls - 1, len(self.review_results) - 1)]
         emit("行程审核Agent", "success", f"第{self.review_calls}轮审核{'通过' if passed else '不通过'}")
         return {"passed": passed, "reasons": []}
 
-    def optimize_phase(self, plan, review_data, request, round_index, emit):
+    def optimize_phase(self, plan, review_data, request, round_index, emit, memory_context=""):
         self.optimize_calls += 1
         emit("行程修正Agent", "success", "已修正")
         return self.plan
@@ -147,26 +147,27 @@ from app.models.db_models import GenerationLog, User
 from app.services.security import get_password_hash
 
 class FakeHttpPlanner:
-    def plan_trip(self, request, progress_callback=None, knowledge_context="", run_id=""):
+    def plan_trip(self, request, progress_callback=None, knowledge_context="", run_id="", memory_context=""):
         if progress_callback:
             progress_callback({"name": "景点搜索Agent", "status": "success", "summary": "mock完成", "duration_ms": 5})
             progress_callback({"name": "行程规划Agent", "status": "success", "summary": "mock完成", "duration_ms": 5})
         return make_plan()
 
 trip_module.get_trip_planner_agent = lambda: FakeHttpPlanner()
-trip_module.get_cached_plan = lambda request, user_id: None
+trip_module.get_cached_plan = lambda request, user_id, memory_context="": None
 trip_module.check_plan_rate_limit = lambda user_id, client_key: (True, 0)
-trip_module.set_cached_plan = lambda request, plan, user_id: None
+trip_module.set_cached_plan = lambda request, plan, user_id, memory_context="": None
 
 
 class FakeRetrieval:
     context = ""
+    hits: list = []
 
     def refs(self):
         return []
 
 
-trip_module.run_agentic_retrieval = lambda db, request, progress=None: FakeRetrieval()
+trip_module.run_agentic_retrieval = lambda db, request, progress=None, memory_context="": FakeRetrieval()
 
 Base.metadata.create_all(bind=engine)
 db = SessionLocal()

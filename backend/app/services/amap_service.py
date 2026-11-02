@@ -1,15 +1,36 @@
-"""高德地图MCP服务封装"""
+"""高德地图服务封装
+
+POI/天气等查询仍走高德 MCP;路线规划改走高德 Web 服务 REST 接口,
+避免 MCP stdio 在返回大体积路线数据时阻塞或崩溃。
+"""
 
 import json
 import re
 from typing import Any, Dict, List, Optional
 
+import httpx
 from hello_agents.tools import MCPTool
 
 from ..config import get_settings
 from ..models.schemas import Location, POIInfo, WeatherInfo
 
+AMAP_REST_BASE = "https://restapi.amap.com/v3"
+
 _amap_mcp_tool = None
+
+
+def amap_rest_get(path: str, params: Dict[str, str]) -> Dict[str, Any]:
+    """调用高德 Web 服务接口,固定超时避免线程被无限阻塞。"""
+    settings = get_settings()
+    if not settings.amap_api_key:
+        raise ValueError("高德地图API Key未配置,请在.env文件中设置AMAP_API_KEY")
+    with httpx.Client(timeout=httpx.Timeout(12.0, connect=5.0)) as client:
+        response = client.get(f"{AMAP_REST_BASE}{path}", params={**params, "key": settings.amap_api_key})
+        response.raise_for_status()
+        payload = response.json()
+    if str(payload.get("status")) != "1":
+        raise ValueError(payload.get("info") or "高德接口返回异常")
+    return payload
 
 
 def get_amap_mcp_tool() -> MCPTool:
@@ -24,7 +45,8 @@ def get_amap_mcp_tool() -> MCPTool:
         _amap_mcp_tool = MCPTool(
             name="amap",
             description="高德地图服务,支持POI搜索、路线规划、天气查询等功能",
-            server_command=["uvx", "amap-mcp-server"],
+            # uvx 默认会解析到最新 pydantic,与 amap-mcp-server 依赖的 mcp 1.x 不兼容
+            server_command=["uvx", "--with", "pydantic<2.11", "amap-mcp-server"],
             env=env_vars,
             auto_expand=True,
         )
@@ -89,7 +111,14 @@ def normalize_poi(item: dict) -> dict:
 
 class AmapService:
     def __init__(self):
-        self.mcp_tool = get_amap_mcp_tool()
+        # MCP 只在真正用到 POI/天气时才启动,路线走 REST 不需要拉起子进程
+        self._mcp_tool: Optional[MCPTool] = None
+
+    @property
+    def mcp_tool(self) -> MCPTool:
+        if self._mcp_tool is None:
+            self._mcp_tool = get_amap_mcp_tool()
+        return self._mcp_tool
 
     def _call(self, tool_name: str, arguments: dict) -> Any:
         return parse_mcp_result(self.mcp_tool.run({"action": "call_tool", "tool_name": tool_name, "arguments": arguments}))
@@ -121,14 +150,83 @@ class AmapService:
     def get_weather(self, city: str) -> List[WeatherInfo]:
         return []
 
-    def plan_route(self, origin_address: str, destination_address: str, origin_city: Optional[str] = None, destination_city: Optional[str] = None, route_type: str = "walking") -> Dict[str, Any]:
-        tool_name = {"walking": "maps_direction_walking_by_address", "driving": "maps_direction_driving_by_address", "transit": "maps_direction_transit_integrated_by_address"}.get(route_type, "maps_direction_walking_by_address")
-        arguments = {"origin_address": origin_address, "destination_address": destination_address}
-        if origin_city:
-            arguments["origin_city"] = origin_city
-        if destination_city:
-            arguments["destination_city"] = destination_city
-        return self._call(tool_name, arguments)
+    ROUTE_PATHS = {
+        "walking": "/direction/walking",
+        "driving": "/direction/driving",
+        "transit": "/direction/transit/integrated",
+    }
+
+    def geocode_location(self, address: str, city: Optional[str] = None) -> Location:
+        """通过高德地理编码接口把地址转成经纬度。"""
+        params = {"address": address}
+        if city:
+            params["city"] = city
+        payload = amap_rest_get("/geocode/geo", params)
+        geocodes = payload.get("geocodes") or []
+        location_text = (geocodes[0] or {}).get("location", "") if geocodes else ""
+        parts = str(location_text).split(",")
+        if len(parts) != 2 or not parts[0] or not parts[1]:
+            raise ValueError(f"高德无法解析地址: {address}")
+        return Location(longitude=float(parts[0]), latitude=float(parts[1]))
+
+    def plan_route_by_location(
+        self,
+        origin: Location,
+        destination: Location,
+        city: str,
+        route_type: str = "walking",
+    ) -> Dict[str, Any]:
+        """按经纬度规划路线,走 REST 接口,不经过 MCP stdio。"""
+        path = self.ROUTE_PATHS.get(route_type, self.ROUTE_PATHS["walking"])
+        params = {
+            "origin": f"{origin.longitude},{origin.latitude}",
+            "destination": f"{destination.longitude},{destination.latitude}",
+            "extensions": "base",
+        }
+        if route_type == "transit":
+            params.update({"city": city, "cityd": city})
+        return amap_rest_get(path, params)
+
+    def plan_route(
+        self,
+        origin_address: str,
+        destination_address: str,
+        origin_city: Optional[str] = None,
+        destination_city: Optional[str] = None,
+        route_type: str = "walking",
+    ) -> Dict[str, Any]:
+        city = origin_city or destination_city or ""
+        origin = self.geocode_location(origin_address, origin_city)
+        destination = self.geocode_location(destination_address, destination_city)
+        return self.plan_route_by_location(origin, destination, city, route_type)
+
+    def parse_route_path(self, payload: Any, route_type: str = "walking") -> List[List[float]]:
+        """从高德路线响应中提取折线坐标,供前端绘制真实路线。"""
+        points: List[List[float]] = []
+        if not isinstance(payload, dict):
+            return points
+        route_node = payload.get("route") or {}
+
+        def add_polyline(polyline: Any) -> None:
+            for pair in str(polyline or "").split(";"):
+                longitude, _, latitude = pair.partition(",")
+                try:
+                    points.append([float(longitude), float(latitude)])
+                except ValueError:
+                    continue
+
+        if route_type == "transit":
+            for transit in (route_node.get("transits") or [])[:1]:
+                for segment in transit.get("segments") or []:
+                    for step in (segment.get("walking") or {}).get("steps") or []:
+                        add_polyline(step.get("polyline"))
+                    for busline in (segment.get("bus") or {}).get("buslines") or []:
+                        add_polyline(busline.get("polyline"))
+        else:
+            for path in (route_node.get("paths") or [])[:1]:
+                for step in path.get("steps") or []:
+                    add_polyline(step.get("polyline"))
+        return points
 
     def parse_route_summary(self, payload: Any, route_type: str = "walking") -> Dict[str, Any]:
         """从高德路线规划响应中提取距离与时长摘要。

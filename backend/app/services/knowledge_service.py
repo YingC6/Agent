@@ -6,10 +6,9 @@ from dataclasses import dataclass
 from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from ..agents.registry import get_agent
 from ..models.db_models import KnowledgeItem, TripRating, TripRecord
 from ..models.schemas import TripPlan, TripRequest
-from ..services.llm_service import get_llm
-from hello_agents import SimpleAgent
 
 SYNONYMS = {
     "美食": ["吃", "小吃", "火锅", "特色菜", "餐厅"],
@@ -111,7 +110,13 @@ def score_knowledge(item: KnowledgeItem, request: TripRequest) -> int:
 
 @dataclass(frozen=True)
 class KnowledgeChunk:
-    item: KnowledgeItem
+    """知识条目分块。
+
+    只保存 item_id,不持有 ORM 对象:向量索引是跨请求常驻的内存状态,
+    若持有 KnowledgeItem 实例,创建它的 Session 关闭后再访问属性会抛
+    DetachedInstanceError。检索时用 item_id 在当前 Session 里映射回条目。
+    """
+    item_id: int
     index: int
     content: str
 
@@ -129,7 +134,7 @@ def split_knowledge_chunks(item: KnowledgeItem, chunk_size: int = 480, chunk_ove
             boundary = max(content.rfind("。", start, end), content.rfind("\n", start, end))
             if boundary > start + chunk_size // 2:
                 end = boundary + 1
-        chunks.append(KnowledgeChunk(item=item, index=index, content=content[start:end]))
+        chunks.append(KnowledgeChunk(item_id=item.id, index=index, content=content[start:end]))
         if end >= len(content):
             break
         start = max(end - chunk_overlap, start + 1)
@@ -146,9 +151,12 @@ class KnowledgeHit:
     source: str
 
 
-def build_retrieval_query(request: TripRequest) -> str:
+def build_retrieval_query(request: TripRequest, memory_context: str = "") -> str:
     preferences = "、".join(request.preferences) if request.preferences else "无"
-    return f"目的地：{request.city}；天数：{request.travel_days}；偏好：{preferences}；补充需求：{request.free_text_input or '无'}"
+    query = f"目的地：{request.city}；天数：{request.travel_days}；偏好：{preferences}；补充需求：{request.free_text_input or '无'}"
+    if memory_context:
+        query += f"；{memory_context}"
+    return query
 
 
 def rerank_knowledge_with_llm(request: TripRequest, candidates: list[KnowledgeItem], limit: int) -> list[KnowledgeItem]:
@@ -163,7 +171,7 @@ def rerank_knowledge_with_llm(request: TripRequest, candidates: list[KnowledgeIt
 候选资料：
 {candidate_text}"""
     try:
-        response = SimpleAgent(name="旅行知识重排Agent", llm=get_llm(), system_prompt="请严格输出合法JSON数组。").run(prompt)
+        response = get_agent("knowledge_rerank", "旅行知识重排Agent", "请严格输出合法JSON数组。").run(prompt)
         match = re.search(r"\[[\s\S]*?\]", response)
         if not match:
             raise ValueError("模型未返回资料ID数组")
@@ -205,6 +213,7 @@ def retrieve_knowledge(
     items = db.scalars(select(KnowledgeItem)).all()
     if not items:
         return []
+    items_by_id = {item.id: item for item in items}
 
     request_terms = expand_terms(request.preferences, request.free_text_input or "")
     hits: dict[int, KnowledgeHit] = {}
@@ -222,11 +231,14 @@ def retrieve_knowledge(
 
     # 阶段2: 向量召回补充语义候选,按条目合并取最高分分块
     for vector_score, chunk in _vector_recall(items, query or build_retrieval_query(request), top_k=8):
-        existing = hits.get(chunk.item.id)
+        item = items_by_id.get(chunk.item_id)
+        if item is None:  # 索引中的条目已被删除,跳过
+            continue
+        existing = hits.get(item.id)
         combined = vector_score * VECTOR_WEIGHT + (existing.score if existing else 0.0)
         keep_rule_chunk = existing is not None and existing.chunk is not None and vector_score < VECTOR_CHUNK_THRESHOLD
-        hits[chunk.item.id] = KnowledgeHit(
-            item=existing.item if existing else chunk.item,
+        hits[item.id] = KnowledgeHit(
+            item=item,
             chunk=existing.chunk if keep_rule_chunk else chunk,
             score=combined,
             source=f"{existing.source}+vector" if existing else "vector",

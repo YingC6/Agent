@@ -30,6 +30,7 @@ def init_db():
     Base.metadata.create_all(bind=engine)
     sync_sqlite_schema()
     sync_conversation_schema()
+    sync_memory_schema()
 
 
 def migrate_sqlite_community_schema():
@@ -104,3 +105,21 @@ def sync_conversation_schema():
             for name, definition in conv_additions.items():
                 if name not in conv_columns:
                     conn.execute(text(f"ALTER TABLE conversations ADD COLUMN {name} {definition}"))
+
+
+def sync_memory_schema():
+    """为旧库补充记忆语义键与失效标记字段。"""
+    if engine.dialect.name != "sqlite":
+        return
+    inspector = inspect(engine)
+    if "user_memories" not in inspector.get_table_names():
+        return
+    columns = {column["name"] for column in inspector.get_columns("user_memories")}
+    additions = {
+        "memory_key": "VARCHAR(120) NOT NULL DEFAULT ''",
+        "is_active": "BOOLEAN NOT NULL DEFAULT 1",
+    }
+    with engine.begin() as conn:
+        for name, definition in additions.items():
+            if name not in columns:
+                conn.execute(text(f"ALTER TABLE user_memories ADD COLUMN {name} {definition}"))

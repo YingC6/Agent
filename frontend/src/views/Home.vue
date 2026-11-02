@@ -170,6 +170,18 @@
               class="custom-textarea"
             />
           </a-form-item>
+
+          <a-form-item name="search_mode">
+            <template #label>
+              <span class="form-label">🌐 联网搜索</span>
+            </template>
+            <a-radio-group v-model:value="formData.search_mode" button-style="solid">
+              <a-radio-button value="auto">自动（时效性需求时联网）</a-radio-button>
+              <a-radio-button value="on">开启（每次都联网补充）</a-radio-button>
+              <a-radio-button value="off">关闭（仅站内攻略与高德数据）</a-radio-button>
+            </a-radio-group>
+            <div class="search-mode-tip">联网结果仅作参考,开放时间与门票请以高德地图为准。</div>
+          </a-form-item>
         </div>
 
         <!-- 提交按钮 -->
@@ -256,7 +268,8 @@ const formData = reactive<TripFormState>({
   transportation: '公共交通',
   accommodation: '经济型酒店',
   preferences: [],
-  free_text_input: ''
+  free_text_input: '',
+  search_mode: 'auto'
 })
 
 // 监听日期变化,自动计算旅行天数
@@ -283,6 +296,7 @@ const buildRequestData = (): TripFormData => ({
   transportation: formData.transportation,
   accommodation: formData.accommodation,
   preferences: formData.preferences,
+  search_mode: formData.search_mode,
   free_text_input: [
     formData.free_text_input,
     tripStore.pendingPois.length ? `用户指定优先安排的地点：${tripStore.pendingPois.map(item => item.name).join('、')}` : ''
@@ -680,6 +694,12 @@ const handleSubmit = async () => {
 .custom-textarea :deep(.ant-input:focus) {
   border-color: #667eea;
   box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+}
+
+.search-mode-tip {
+  margin-top: 8px;
+  font-size: 12px;
+  color: #999;
 }
 
 /* 提交按钮 */

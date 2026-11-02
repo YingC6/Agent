@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 
 from ..models.db_models import TripChecklist, TripRecord
 from ..models.schemas import TripPlan
-from .llm_service import get_llm
+from ..agents.registry import get_agent
 
 # 清单分类常量
 CATEGORIES = ["证件", "衣物", "电子", "药品", "其他"]
@@ -107,8 +107,6 @@ def generate_checklist_with_ai(db: Session, trip: TripRecord, plan: TripPlan) ->
     生成失败时回退到 FALLBACK_CHECKLIST 通用模板。
     已有清单条目不会被覆盖,仅追加新条目。
     """
-    from hello_agents import SimpleAgent
-
     preferences = ""
     if plan.days:
         attractions = []
@@ -127,12 +125,7 @@ def generate_checklist_with_ai(db: Session, trip: TripRecord, plan: TripPlan) ->
     )
 
     try:
-        agent = SimpleAgent(
-            name="出行清单生成Agent",
-            llm=get_llm(),
-            system_prompt="请严格输出合法JSON数组。",
-        )
-        response = agent.run(prompt)
+        response = get_agent("checklist", "出行清单生成Agent", "请严格输出合法JSON数组。").run(prompt)
         match = re.search(r"\[[\s\S]*\]", response)
         if not match:
             raise ValueError("AI 未返回 JSON 数组")

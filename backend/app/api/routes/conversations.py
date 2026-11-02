@@ -6,21 +6,21 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
-from hello_agents import SimpleAgent
 from loguru import logger
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from ...agents.registry import get_agent
 from ...api.deps import get_current_user
 from ...database import get_db
+from ...domain.validators.execution import merge_validation_warnings
 from ...models.db_models import Conversation, ConversationMessage, TripRecord, TripVersion
 from ...models.schemas import TripPlan, TripRequest
 from ...services.ai_trip_service import optimize_trip_plan
 from ...services.amap_service import get_amap_service
 from ...services.context_builder import build_conversation_context
 from ...services.knowledge_agent import run_agentic_retrieval
-from ...services.llm_service import get_llm
-from ...services.memory_service import remember_preferences_from_message
+from ...services.memory_service import build_user_memory_context, remember_preferences_from_message
 from ...services.plan_diff_service import compute_plan_diff
 from ...services.plan_validator import validate_plan_execution
 from ...services.summary_service import maybe_summarize_conversation
@@ -127,13 +127,14 @@ def _should_retrieve_knowledge(content: str) -> bool:
     return len(text) >= 4 and text not in CHITCHAT_ONLY
 
 
-def _knowledge_context(content: str, plan: TripPlan, db: Session) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
+def _knowledge_context(content: str, plan: TripPlan, db: Session, user_id: int | None = None) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
     """对话场景的知识检索:限制单轮并跳过LLM重排,避免拖慢聊天响应。"""
     if not _should_retrieve_knowledge(content):
         return "", [], []
     request = _request_from_plan(plan).model_copy(update={"free_text_input": content})
+    memory_context = build_user_memory_context(db, user_id) if user_id else ""
     try:
-        retrieval = run_agentic_retrieval(db, request, max_rounds=1, rerank=False)
+        retrieval = run_agentic_retrieval(db, request, max_rounds=1, rerank=False, memory_context=memory_context)
     except Exception as error:
         logger.warning("conversation_knowledge_failed error={}", str(error))
         return "", [], []
@@ -167,17 +168,7 @@ def _stream_text(content: str) -> Generator[str, None, None]:
 
 
 def _stream_agent_response(prompt: str) -> Generator[str, None, None]:
-    agent = SimpleAgent(name="行程多轮对话Agent", llm=get_llm(), system_prompt="请使用中文，简洁、准确地协助旅行计划调整。")
-    stream = getattr(agent, "stream_run", None)
-    if not callable(stream):
-        response = agent.run(prompt)
-        for index in range(0, len(response), 24):
-            yield response[index:index + 24]
-        return
-    for chunk in stream(prompt):
-        text = str(chunk)
-        if text:
-            yield text
+    yield from get_agent("conversation_chat", "行程多轮对话Agent", "请使用中文，简洁、准确地协助旅行计划调整。").stream(prompt)
 
 
 @router.post("")
@@ -249,16 +240,16 @@ def _process_message(conversation_id: int, request: ConversationMessageRequest, 
         tool_context, task_steps, query_results = _tool_context(intent, request.content, plan)
         knowledge_context = ""
         if intent.name == "answer":
-            knowledge_context, knowledge_steps, knowledge_results = _knowledge_context(request.content, plan, db)
+            knowledge_context, knowledge_steps, knowledge_results = _knowledge_context(request.content, plan, db, current_user.id)
             task_steps.extend(knowledge_steps)
             query_results.extend(knowledge_results)
         if intent.name == "modify":
-            candidate = optimize_trip_plan(plan, f"{request.content}\n{tool_context}")
+            memory_context = build_user_memory_context(db, current_user.id)
+            candidate = optimize_trip_plan(plan, f"{request.content}\n{tool_context}\n{memory_context}")
             validation = validate_plan_execution(candidate, _request_from_plan(plan))
             if validation.errors:
                 raise ValueError("；".join(validation.errors))
-            if validation.warnings:
-                candidate.warnings = [*candidate.warnings, *validation.warnings]
+            candidate = merge_validation_warnings(candidate, validation)
             diff = compute_plan_diff(plan, candidate)
             _PENDING_CHANGES[conversation.id] = {"plan": candidate, "diff": diff}
             response = f"已生成候选修改：{diff['summary']}。请查看预览后回复“确认”保存，或回复“取消”放弃。"
@@ -266,7 +257,7 @@ def _process_message(conversation_id: int, request: ConversationMessageRequest, 
             pending_change, version_id = {"plan": candidate.model_dump(), "diff": diff}, None
         else:
             prompt = "你是旅行行程助手。基于当前计划、用户长期偏好和最近对话回答用户。实时查询结果仅作参考，不能编造事实。请使用中文，简洁回答。\n" + build_conversation_context(conversation, plan, db=db) + "\n" + tool_context + "\n" + knowledge_context + "\n用户最新请求: " + request.content
-            response = SimpleAgent(name="行程多轮对话Agent", llm=get_llm(), system_prompt="请使用中文，简洁、准确地协助旅行计划调整。").run(prompt)
+            response = get_agent("conversation_chat", "行程多轮对话Agent", "请使用中文，简洁、准确地协助旅行计划调整。").run(prompt)
             task_steps.append({"name": "对话回答", "status": "success", "summary": "已生成回复", "duration_ms": 0})
             pending_change, version_id = None, version.id if version else None
         assistant_message = _append_message(db, conversation, "assistant", response, version_id, "completed", task_steps, started_at)
@@ -306,7 +297,7 @@ def stream_message(conversation_id: int, request: ConversationMessageRequest, cu
             tool_context, task_steps, query_results = _tool_context(intent, request.content, plan)
             knowledge_context = ""
             if intent.name == "answer":
-                knowledge_context, knowledge_steps, knowledge_results = _knowledge_context(request.content, plan, db)
+                knowledge_context, knowledge_steps, knowledge_results = _knowledge_context(request.content, plan, db, current_user.id)
                 task_steps.extend(knowledge_steps)
                 query_results.extend(knowledge_results)
             yield _sse("meta", {"intent": intent.model_dump(), "query_results": query_results})

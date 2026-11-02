@@ -95,20 +95,14 @@ def _judge_sufficiency(hits: list[KnowledgeHit], context: str) -> tuple[bool, st
 
 def _rewrite_query(request: TripRequest, base_query: str, gap_reason: str) -> str:
     """召回不足时改写检索查询,失败则回退到结构化查询。"""
-    from hello_agents import SimpleAgent
-
-    from .llm_service import get_llm
+    from ..agents.registry import get_agent
 
     prompt = f"""你是旅行知识检索的查询改写器。当前检索结果不足:{gap_reason}
 请把下面的旅行需求改写为一条更适合知识库检索的中文查询,突出城市、天数、游玩主题和用户明确需求,可以补充同类场景词。
 要求:只输出一行查询文本,不超过60字,不要解释,不要加引号。
 原始需求:{base_query}"""
     try:
-        response = SimpleAgent(
-            name="检索查询改写Agent",
-            llm=get_llm(),
-            system_prompt="只输出一行中文检索查询,不要任何解释。",
-        ).run(prompt)
+        response = get_agent("knowledge_rewrite", "检索查询改写Agent", "只输出一行中文检索查询,不要任何解释。").run(prompt)
         text = (response or "").strip().splitlines()[0].strip().strip('"') if (response or "").strip() else ""
         if text:
             return text[:80]
@@ -130,10 +124,11 @@ def run_agentic_retrieval(
     limit: int = 3,
     max_rounds: int = MAX_ROUNDS,
     rerank: bool = True,
+    memory_context: str = "",
 ) -> AgenticRetrievalResult:
     """执行 Agentic 检索循环,返回命中分块、上下文与轮次轨迹。"""
     result = AgenticRetrievalResult()
-    base_query = build_retrieval_query(request)
+    base_query = build_retrieval_query(request, memory_context)
     query: str | None = None
     seen: dict[int, KnowledgeHit] = {}
     merged: list[KnowledgeHit] = []
@@ -191,3 +186,10 @@ def run_agentic_retrieval(
         [trace.to_dict() for trace in result.traces],
     )
     return result
+
+
+def knowledge_gap_warning(retrieval: AgenticRetrievalResult, request: TripRequest) -> str:
+    """知识库零命中且未开启联网搜索时,返回一条可读提示。"""
+    if retrieval.hits or request.search_mode == "on":
+        return ""
+    return "知识库暂无匹配攻略，可开启联网搜索获取最新信息。"

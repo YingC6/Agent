@@ -83,8 +83,10 @@ class UserMemory(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
     memory_type: Mapped[str] = mapped_column(String(40), default="preference", nullable=False, index=True)
+    memory_key: Mapped[str] = mapped_column(String(120), default="", nullable=False, index=True)
     content: Mapped[str] = mapped_column(String(500), nullable=False)
     importance: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

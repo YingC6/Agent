@@ -57,6 +57,11 @@ class Settings(BaseSettings):
     plan_rate_limit_count: int = 3
     plan_rate_limit_window_seconds: int = 60
     max_review_rounds: int = 2
+    # 条件触发择优: 自评分低于阈值时才生成备选行程
+    plan_candidate_min_score: int = 75
+    plan_candidate_count: int = 2
+    # 联网搜索默认模式: off/auto/on
+    web_search_default_mode: str = "auto"
 
     # JWT配置
     jwt_secret_key: str = "please-change-this-secret-key"

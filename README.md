@@ -5,11 +5,15 @@
 ## ✨ 功能特点
 
 ### 核心能力
-- 🤖 **LangGraph 工作流编排**: 状态机驱动多阶段规划(prepare → research → generate → review → optimize → enrich)
-- 🧠 **FAISS 向量 RAG**: 知识库分块嵌入 + 向量检索 + 规则召回 + LLM 语义重排混合检索
+- 🤖 **LangGraph 工作流编排**: 状态机驱动多阶段规划(prepare → research → generate → review → optimize → enrich → validate_execution)
+- 🧠 **FAISS 向量 RAG**: 知识库分块嵌入 + 向量检索 + 规则召回 + LLM 语义重排混合检索,召回不足自动改写查询
 - 🤝 **多智能体并行协作**: 景点/天气/酒店 Agent 独立实例并行调研,避免线程安全问题
 - 🗺️ **高德地图 MCP 集成**: 通过 MCP 协议接入景点搜索、路线规划、天气查询
 - 🔄 **Planning-Review 双阶段架构**: 规划 Agent 生成后由审核 Agent 检查,不通过自动修正(受最大轮次约束)
+- 🕘 **时间表排程**: 基于景点游览时长与通勤时长确定性生成每日时间轴
+- ❓ **主动澄清需求**: 偏好缺失或行程过长时先向用户提问,结果随行程返回
+- 🌐 **三源融合搜索**: 站内攻略 + 高德实时数据 + 联网搜索(Tavily),按 30 天半衰期加权,冲突以高德为准
+- 🏆 **条件触发择优**: 行程自评分低于阈值时并行生成备选并一次性评审择优,控制 LLM 成本
 
 ### 平台功能
 - 👤 **用户系统**: 注册登录、JWT 认证、角色管理(普通用户/管理员)
@@ -147,6 +151,8 @@ cp .env.example .env
 #   LLM_MODEL_ID       - 模型名称
 #   LLM_TIMEOUT=300    - 行程生成需要较长超时
 #   AMAP_API_KEY       - 高德地图 Web 服务 Key
+#   TAVILY_API_KEY     - 可选,联网搜索密钥,不配置则自动跳过
+#   WEB_SEARCH_DEFAULT_MODE=auto - 联网搜索默认模式: off/auto/on
 ```
 
 4. 启动后端服务
@@ -220,8 +226,9 @@ graph.add_node("generate", _generate)
 graph.add_node("review", _review)
 graph.add_node("optimize", _optimize)
 graph.add_node("enrich", _enrich)
+graph.add_node("validate_execution", _validate_execution)
 
-# 条件路由:审核通过→enrich,未通过→optimize→review(循环受 max_rounds 约束)
+# 条件路由:审核通过→enrich→validate,未通过→optimize→review(循环受 max_rounds 约束)
 graph.add_conditional_edges("review", _route_after_review, {...})
 graph.compile()
 ```

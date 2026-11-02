@@ -26,6 +26,15 @@ export interface RouteSegment {
   route_type: string
   distance_km: number
   duration_minutes: number
+  path?: number[][]
+}
+
+export interface TimelineItem {
+  time: string
+  title: string
+  category: 'attraction' | 'meal' | 'transit' | string
+  duration_minutes: number
+  detail?: string
 }
 
 export interface DayPlan {
@@ -41,11 +50,13 @@ export interface DayPlan {
   estimated_transit_minutes?: number
   comfort_level?: string
   plan_b?: string
+  timeline?: TimelineItem[]
 }
 export interface WeatherInfo { date: string; day_weather: string; night_weather: string; day_temp: number; night_temp: number; wind_direction: string; wind_power: string }
 export interface KnowledgeRef { id: number; title: string; city: string; score: number; source: string; chunk_index?: number | null }
-export interface TripPlan { city: string; start_date: string; end_date: string; days: DayPlan[]; weather_info: WeatherInfo[]; overall_suggestions: string; budget?: Budget; source?: string; is_fallback?: boolean; warnings?: string[]; knowledge_refs?: KnowledgeRef[] }
-export interface TripFormData { city: string; start_date: string; end_date: string; travel_days: number; transportation: string; accommodation: string; preferences: string[]; free_text_input: string }
+export interface TripPlan { city: string; start_date: string; end_date: string; days: DayPlan[]; weather_info: WeatherInfo[]; overall_suggestions: string; budget?: Budget; source?: string; is_fallback?: boolean; warnings?: string[]; knowledge_refs?: KnowledgeRef[]; clarification_questions?: string[] }
+export type SearchMode = 'off' | 'auto' | 'on'
+export interface TripFormData { city: string; start_date: string; end_date: string; travel_days: number; transportation: string; accommodation: string; preferences: string[]; free_text_input: string; search_mode?: SearchMode }
 export interface TripPlanResponse { success: boolean; message: string; run_id?: string; data?: TripPlan }
 export interface TripRating { id: number; trip_id: number; rating: number; comment: string }
 export interface KnowledgeItem { id: number; title: string; city: string; days?: number; themes: string[]; keywords: string[]; source: string; source_ref_id?: number; content: string; rating: number; usage_count: number; created_at: string }

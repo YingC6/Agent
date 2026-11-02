@@ -66,11 +66,35 @@
             <!-- 行程概览 -->
             <a-card id="overview" :title="`${tripPlan.city}旅行计划`" :bordered="false" class="overview-card">
               <a-alert
+                v-if="tripPlan.clarification_questions?.length"
+                type="info"
+                show-icon
+                message="以下信息可以补充，让行程更贴合你的需求"
+                class="clarification-alert"
+              >
+                <template #description>
+                  <ul class="clarification-list">
+                    <li v-for="question in tripPlan.clarification_questions" :key="question">{{ question }}</li>
+                  </ul>
+                  <a-button type="link" size="small" style="padding-left: 0" @click="openClarificationOptimize">
+                    补充信息并优化行程
+                  </a-button>
+                </template>
+              </a-alert>
+              <a-alert
                 v-if="tripPlan.is_fallback"
                 type="warning"
                 show-icon
                 message="当前展示的是备用行程"
                 :description="tripPlan.warnings?.join('；') || 'AI 服务未能完成真实规划，请确认景点、路线和预算后再出行。'"
+                class="plan-warning"
+              />
+              <a-alert
+                v-if="!tripPlan.is_fallback && tripPlan.warnings?.length"
+                type="info"
+                show-icon
+                message="出行提示"
+                :description="tripPlan.warnings?.join('；')"
                 class="plan-warning"
               />
               <div class="overview-content">
@@ -160,6 +184,24 @@
               </div>
 
               <a-alert v-if="day.plan_b" class="plan-b-alert" type="info" show-icon :message="`备选方案：${day.plan_b}`" />
+
+              <template v-if="day.timeline?.length">
+                <a-divider orientation="left">🕘 时间表</a-divider>
+                <a-timeline class="day-timeline">
+                  <a-timeline-item
+                    v-for="item in day.timeline"
+                    :key="`${item.time}-${item.title}`"
+                    :color="timelineMeta(item.category).color"
+                  >
+                    <div class="timeline-row">
+                      <span class="timeline-time">{{ item.time }}</span>
+                      <span class="timeline-title">{{ timelineMeta(item.category).icon }} {{ item.title }}</span>
+                      <span v-if="item.duration_minutes" class="timeline-duration">约 {{ item.duration_minutes }} 分钟</span>
+                    </div>
+                    <div v-if="item.detail" class="timeline-detail">{{ item.detail }}</div>
+                  </a-timeline-item>
+                </a-timeline>
+              </template>
 
               <a-timeline v-if="day.route_segments?.length" class="route-timeline">
                 <a-timeline-item v-for="segment in day.route_segments" :key="`${segment.origin}-${segment.destination}`">
@@ -508,6 +550,14 @@ import { createConversation, getConversation, optimizeTrip, streamConversationMe
 import { useTripStore } from '@/stores/trip'
 import type { Conversation, ConversationQueryResult, TripPlan, TripVersion, OptimizeResult, ChecklistResult, ChecklistCategory } from '@/types'
 
+// 时间表条目按类型展示不同图标和颜色
+const TIMELINE_META: Record<string, { icon: string; color: string }> = {
+  attraction: { icon: '🎯', color: 'blue' },
+  meal: { icon: '🍜', color: 'orange' },
+  transit: { icon: '🚗', color: 'gray' }
+}
+const timelineMeta = (category: string) => TIMELINE_META[category] || TIMELINE_META.attraction
+
 const router = useRouter()
 const tripStore = useTripStore()
 const tripPlan = ref<TripPlan | null>(null)
@@ -773,6 +823,11 @@ const initBudgetChart = () => {
       }
     ]
   })
+}
+
+const openClarificationOptimize = () => {
+  optimizeInstruction.value = '请结合以下补充信息优化行程：'
+  showOptimize.value = true
 }
 
 const submitOptimize = async () => {
@@ -1288,7 +1343,10 @@ const initMap = async () => {
     map = new AMap.Map('amap-container', {
       zoom: 12,
       center: [116.397128, 39.916527], // 默认中心点(北京)
-      viewMode: '3D'
+      viewMode: '2D',
+      showLabel: true,
+      mapStyle: 'amap://styles/normal',
+      features: ['bg', 'road', 'building', 'point']
     })
 
     // 添加景点标记
@@ -1300,6 +1358,9 @@ const initMap = async () => {
     message.error('地图加载失败')
   }
 }
+
+// 每天使用不同颜色的标记与路线,避免多天路线混在一起看不清
+const DAY_COLORS = ['#1677ff', '#52c41a', '#fa8c16', '#eb2f96', '#722ed1', '#13c2c2']
 
 // 添加景点标记
 const addAttractionMarkers = (AMap: any) => {
@@ -1327,7 +1388,7 @@ const addAttractionMarkers = (AMap: any) => {
       position: [attraction.location.longitude, attraction.location.latitude],
       title: attraction.name,
       label: {
-        content: `<div style="background: #4CAF50; color: white; padding: 4px 8px; border-radius: 4px; font-size: 12px;">${index + 1}</div>`,
+        content: `<div style="background:${DAY_COLORS[attraction.dayIndex % DAY_COLORS.length]};color:#fff;padding:2px 7px;border-radius:10px;font-size:12px;font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.25);">${index + 1}</div>`,
         offset: new AMap.Pixel(0, -30)
       }
     })
@@ -1357,47 +1418,59 @@ const addAttractionMarkers = (AMap: any) => {
   // 添加标记到地图
   map.add(markers)
 
-  // 自动调整视野以包含所有标记
+  // 自动调整视野以包含所有标记,限制最大缩放级别,避免过度放大
   if (allAttractions.length > 0) {
-    map.setFitView(markers)
+    map.setFitView(markers, false, [48, 48, 48, 48], 16)
   }
 
   // 绘制路线
   drawRoutes(AMap, allAttractions)
 }
 
-// 绘制路线
+// 绘制路线:优先使用后端返回的真实路线折线,旧数据降级为直线连接
 const drawRoutes = (AMap: any, attractions: any[]) => {
-  if (attractions.length < 2) return
+  const days = tripPlan.value?.days || []
+  let drawnCount = 0
 
-  // 按天分组绘制路线
-  const dayGroups: any = {}
-  attractions.forEach(attr => {
-    if (!dayGroups[attr.dayIndex]) {
-      dayGroups[attr.dayIndex] = []
-    }
-    dayGroups[attr.dayIndex].push(attr)
+  days.forEach((day, dayIndex) => {
+    const color = DAY_COLORS[dayIndex % DAY_COLORS.length]
+    ;(day.route_segments || []).forEach((segment) => {
+      if (!segment.path || segment.path.length < 2) return
+      const polyline = new AMap.Polyline({
+        path: segment.path,
+        strokeColor: color,
+        strokeWeight: 5,
+        strokeOpacity: 0.9,
+        strokeStyle: 'solid',
+        showDir: true, // 显示方向箭头
+        lineJoin: 'round',
+        isOutline: true,
+        outlineColor: '#ffffff',
+        borderWeight: 1
+      })
+      map.add(polyline)
+      drawnCount++
+    })
   })
 
-  // 为每天的景点绘制路线
-  Object.values(dayGroups).forEach((dayAttractions: any) => {
+  // 兼容旧行程:没有真实折线时按当天的景点顺序连接
+  if (drawnCount > 0) return
+  const dayGroups: any = {}
+  attractions.forEach(attr => {
+    if (!dayGroups[attr.dayIndex]) dayGroups[attr.dayIndex] = []
+    dayGroups[attr.dayIndex].push(attr)
+  })
+  Object.values(dayGroups).forEach((dayAttractions: any, dayIndex) => {
     if (dayAttractions.length < 2) return
-
-    const path = dayAttractions.map((attr: any) => [
-      attr.location.longitude,
-      attr.location.latitude
-    ])
-
-    const polyline = new AMap.Polyline({
-      path: path,
-      strokeColor: '#1890ff',
+    const path = dayAttractions.map((attr: any) => [attr.location.longitude, attr.location.latitude])
+    map.add(new AMap.Polyline({
+      path,
+      strokeColor: DAY_COLORS[dayIndex % DAY_COLORS.length],
       strokeWeight: 4,
-      strokeOpacity: 0.8,
+      strokeOpacity: 0.75,
       strokeStyle: 'solid',
-      showDir: true // 显示方向箭头
-    })
-
-    map.add(polyline)
+      showDir: true
+    }))
   })
 }
 </script>
@@ -1836,6 +1909,46 @@ const drawRoutes = (AMap: any, attractions: any[]) => {
 
 .plan-b-alert {
   margin-bottom: 16px;
+}
+
+.clarification-alert {
+  margin-bottom: 16px;
+}
+
+.clarification-list {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.day-timeline {
+  margin: 16px 0 8px;
+}
+
+.timeline-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.timeline-time {
+  font-weight: 600;
+  color: #667eea;
+}
+
+.timeline-title {
+  font-weight: 500;
+}
+
+.timeline-duration {
+  font-size: 12px;
+  color: #999;
+}
+
+.timeline-detail {
+  margin-top: 4px;
+  font-size: 13px;
+  color: #666;
 }
 
 .route-timeline {

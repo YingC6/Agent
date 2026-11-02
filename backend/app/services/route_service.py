@@ -6,12 +6,13 @@
 
 from __future__ import annotations
 
+import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Iterable
 
 from loguru import logger
 
-from ..models.schemas import Attraction, RouteSegment
+from ..models.schemas import Attraction, Location, RouteSegment
 from .amap_service import get_amap_service
 
 # 用户输入的交通方式到高德 route_type 的映射
@@ -45,11 +46,30 @@ def resolve_route_type(transportation: str | None) -> str:
     return DEFAULT_ROUTE_TYPE
 
 
-def _attraction_address(attraction: Attraction) -> str:
-    """优先使用地址,缺省时回退到景点名+城市拼接,避免空地址导致 API 拒绝。"""
-    if attraction.address:
-        return attraction.address
-    return attraction.name
+def haversine_km(origin: Location, destination: Location) -> float:
+    """计算两个经纬度之间的直线距离(公里)。"""
+    lat1 = math.radians(origin.latitude)
+    lat2 = math.radians(destination.latitude)
+    delta_lat = lat2 - lat1
+    delta_lon = math.radians(destination.longitude - origin.longitude)
+    a = math.sin(delta_lat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(delta_lon / 2) ** 2
+    return 2 * 6371 * math.asin(math.sqrt(a))
+
+
+MIN_TRUSTED_DISTANCE_KM = 0.05
+
+
+def _resolve_locations(amap, origin: Attraction, destination: Attraction, city: str) -> tuple[Location, Location]:
+    """两个不同景点的坐标几乎重合时,视为模型坐标不可信,按名称重新地理编码。"""
+    if haversine_km(origin.location, destination.location) >= MIN_TRUSTED_DISTANCE_KM:
+        return origin.location, destination.location
+    resolved: list[Location] = []
+    for attraction in (origin, destination):
+        try:
+            resolved.append(amap.geocode_location(attraction.name, city))
+        except Exception:
+            resolved.append(attraction.location)
+    return resolved[0], resolved[1]
 
 
 def build_route_segment(
@@ -60,23 +80,21 @@ def build_route_segment(
 ) -> RouteSegment:
     """调用高德路线规划生成单个 RouteSegment,失败时返回估值兜底。"""
     amap = get_amap_service()
-    origin_address = _attraction_address(origin)
-    destination_address = _attraction_address(destination)
+    origin_location, destination_location = _resolve_locations(amap, origin, destination, city)
     try:
-        payload = amap.plan_route(
-            origin_address=origin_address,
-            destination_address=destination_address,
-            origin_city=city,
-            destination_city=city,
-            route_type=route_type,
-        )
+        # 景点本身带经纬度,直接按坐标规划,省去地址再解析且避免 MCP 大响应阻塞
+        payload = amap.plan_route_by_location(origin_location, destination_location, city, route_type)
         summary = amap.parse_route_summary(payload, route_type)
         distance_meters = summary.get("distance_meters", 0.0)
         duration_seconds = summary.get("duration_seconds", 0)
-        if distance_meters <= 0 and duration_seconds <= 0:
-            raise ValueError("高德返回空路线")
+        # 距离为 0 说明坐标无效或路线为空,不能直接展示成 "0 km"
+        if distance_meters <= 0:
+            raise ValueError("高德返回无效路线")
         distance_km = round(distance_meters / 1000.0, 2)
         duration_minutes = max(int(duration_seconds // 60), 1)
+        route_path = amap.parse_route_path(payload, route_type)
+        if len(route_path) < 2:
+            route_path = [[origin_location.longitude, origin_location.latitude], [destination_location.longitude, destination_location.latitude]]
         route_label = {"walking": "步行", "driving": "驾车", "transit": "公共交通"}.get(route_type, "公共交通")
         return RouteSegment(
             origin=origin.name,
@@ -84,6 +102,7 @@ def build_route_segment(
             route_type=route_label,
             distance_km=distance_km,
             duration_minutes=duration_minutes,
+            path=route_path,
         )
     except Exception as error:
         logger.warning(
@@ -93,13 +112,22 @@ def build_route_segment(
             city,
             str(error),
         )
-        # 兜底:按直线距离粗估,每段至少 10 分钟,避免通勤总时长为 0
+        # 兜底:按直线距离粗估,不同景点至少显示 0.1 km,避免再次出现 0 km
+        distance_km = haversine_km(origin_location, destination_location)
+        if origin.name != destination.name:
+            distance_km = max(distance_km, 0.1)
+        distance_km = round(distance_km, 2)
+        minutes_per_km = {"walking": 13, "driving": 2, "transit": 8}.get(route_type, 8)
+        wait_minutes = 5 if route_type == "transit" else 0
+        duration_minutes = max(1, int(round(distance_km * minutes_per_km + wait_minutes)))
+        route_path = [[origin_location.longitude, origin_location.latitude], [destination_location.longitude, destination_location.latitude]]
         return RouteSegment(
             origin=origin.name,
             destination=destination.name,
             route_type={"walking": "步行", "driving": "驾车", "transit": "公共交通"}.get(route_type, "公共交通"),
-            distance_km=0.0,
-            duration_minutes=15,
+            distance_km=distance_km,
+            duration_minutes=duration_minutes,
+            path=route_path,
         )
 
 

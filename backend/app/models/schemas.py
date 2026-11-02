@@ -1,11 +1,20 @@
 """数据模型定义"""
 
-from typing import List, Optional, Union
+from typing import List, Literal, Optional, Union
 from pydantic import BaseModel, Field, field_validator, model_validator
 from datetime import date
 
+from ..domain.validators.contract import plan_contract_errors
+
 
 # ============ 请求模型 ============
+
+def _default_search_mode() -> str:
+    """联网搜索默认模式来自配置,便于部署时统一调整。"""
+    from ..config import get_settings
+
+    return get_settings().web_search_default_mode
+
 
 class TripRequest(BaseModel):
     """旅行规划请求"""
@@ -17,6 +26,7 @@ class TripRequest(BaseModel):
     accommodation: str = Field(..., description="住宿偏好", example="经济型酒店")
     preferences: List[str] = Field(default=[], description="旅行偏好标签", example=["历史文化", "美食"])
     free_text_input: Optional[str] = Field(default="", description="额外要求", example="希望多安排一些博物馆")
+    search_mode: Literal["off", "auto", "on"] = Field(default_factory=_default_search_mode, description="联网搜索开关: off/auto/on")
     
     class Config:
         json_schema_extra = {
@@ -101,6 +111,16 @@ class RouteSegment(BaseModel):
     route_type: str = Field(default="公共交通", description="交通方式")
     distance_km: float = Field(default=0, description="距离(公里)")
     duration_minutes: int = Field(default=0, description="预计耗时(分钟)")
+    path: list[list[float]] = Field(default_factory=list, description="路线折线坐标 [[经度,纬度],...]")
+
+
+class TimelineItem(BaseModel):
+    """时间表条目"""
+    time: str = Field(..., description="开始时间 HH:MM")
+    title: str = Field(..., description="事项名称")
+    category: str = Field(default="attraction", description="类型: attraction/meal/transit")
+    duration_minutes: int = Field(default=0, description="预计时长(分钟)")
+    detail: str = Field(default="", description="补充说明")
 
 
 class DayPlan(BaseModel):
@@ -117,6 +137,7 @@ class DayPlan(BaseModel):
     estimated_transit_minutes: int = Field(default=0, description="预计通勤总时长(分钟)")
     comfort_level: str = Field(default="适中", description="行程舒适度")
     plan_b: str = Field(default="", description="天气或临时变化的备选方案")
+    timeline: List[TimelineItem] = Field(default=[], description="当日时间表")
 
 
 class WeatherInfo(BaseModel):
@@ -165,25 +186,14 @@ class TripPlan(BaseModel):
     is_fallback: bool = Field(default=False, description="是否为降级计划")
     warnings: List[str] = Field(default=[], description="计划警告")
     knowledge_refs: List[dict] = Field(default=[], description="本次采用的知识库资料来源")
+    clarification_questions: List[str] = Field(default=[], description="需要用户补充确认的问题")
 
 
     @model_validator(mode="after")
     def validate_deterministic_constraints(self):
-        if self.start_date > self.end_date:
-            raise ValueError("开始日期不能晚于结束日期")
-        if not self.days:
-            raise ValueError("行程至少包含一天")
-        expected_dates = [day.date for day in self.days]
-        if len(set(expected_dates)) != len(expected_dates):
-            raise ValueError("每日行程日期不能重复")
-        if [day.day_index for day in self.days] != list(range(len(self.days))):
-            raise ValueError("每日行程索引必须从0连续递增")
-        if any(not 1 <= len(day.attractions) <= 3 for day in self.days):
-            raise ValueError("每天必须安排1至3个景点")
-        if any(len({attraction.name for attraction in day.attractions}) != len(day.attractions) for day in self.days):
-            raise ValueError("同一天不能安排重复景点")
-        if self.budget and self.budget.total != self.budget.total_attractions + self.budget.total_hotels + self.budget.total_meals + self.budget.total_transportation:
-            raise ValueError("预算总额必须等于各项费用之和")
+        errors = plan_contract_errors(self)
+        if errors:
+            raise ValueError(errors[0])
         return self
 
 

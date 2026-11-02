@@ -5,17 +5,20 @@ import queue
 import threading
 import time
 import uuid
+from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from ...api.deps import get_optional_user
 from ...agents.trip_planner_agent import get_trip_planner_agent
+from ...config import get_settings
 from ...database import SessionLocal, get_db
 from ...models.schemas import TripPlan, TripPlanResponse, TripRequest
 from ...services.ai_guard_service import check_plan_rate_limit, get_cached_plan, set_cached_plan
 from ...services.ai_trip_service import optimize_trip_plan, parse_natural_language
-from ...services.knowledge_agent import run_agentic_retrieval
+from ...services.knowledge_agent import knowledge_gap_warning, run_agentic_retrieval
+from ...services.memory_service import build_user_memory_context
 from ...services.plan_diff_service import compute_plan_diff
 from ...services.trip_repository import create_generation_log, create_trip_record, trip_to_dict
 
@@ -49,9 +52,10 @@ async def plan_trip(request_data: TripRequest, http_request: Request, current_us
 
     try:
         user_id = current_user.id if current_user else None
-        cached_plan = get_cached_plan(request_data, user_id)
+        memory_context = build_user_memory_context(db, current_user.id) if current_user else ""
+        cached_plan = get_cached_plan(request_data, user_id, memory_context)
         if cached_plan:
-            cached_plan = cached_plan.model_copy(update={"source": "cache", "is_fallback": False, "warnings": []})
+            cached_plan = cached_plan.model_copy(update={"source": "cache", "is_fallback": False})
             collect({"name": "AI结果缓存", "status": "success", "summary": "命中相同旅行需求缓存,直接返回历史生成结果", "duration_ms": 0})
             record = create_trip_record(db, cached_plan, request_data, user_id, source="cache") if user_id else None
             duration_ms = int((time.time() - started_at) * 1000)
@@ -62,12 +66,21 @@ async def plan_trip(request_data: TripRequest, http_request: Request, current_us
         if not allowed:
             raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=f"生成过于频繁,请{retry_after}秒后再试")
 
-        retrieval = run_agentic_retrieval(db, request_data, progress=collect)
+        retrieval = run_agentic_retrieval(db, request_data, progress=collect, memory_context=memory_context)
         agent = get_trip_planner_agent()
-        trip_plan = agent.plan_trip(request_data, progress_callback=collect, knowledge_context=retrieval.context, run_id=run_id)
+        trip_plan = agent.plan_trip(
+            request_data,
+            progress_callback=collect,
+            knowledge_context=retrieval.context,
+            run_id=run_id,
+            memory_context=memory_context,
+        )
         trip_plan = trip_plan.model_copy(update={"knowledge_refs": retrieval.refs()})
+        gap_warning = knowledge_gap_warning(retrieval, request_data)
+        if gap_warning:
+            trip_plan.warnings.append(gap_warning)
         if not trip_plan.is_fallback:
-            set_cached_plan(request_data, trip_plan, user_id)
+            set_cached_plan(request_data, trip_plan, user_id, memory_context)
         record = None
         if current_user:
             record = create_trip_record(db, trip_plan, request_data, current_user.id)
@@ -82,7 +95,7 @@ async def plan_trip(request_data: TripRequest, http_request: Request, current_us
 
 
 @router.get("/plan/stream")
-def stream_plan(http_request: Request, city: str = Query(...), start_date: str = Query(...), end_date: str = Query(...), travel_days: int = Query(..., ge=1, le=30), transportation: str = Query(default="公共交通"), accommodation: str = Query(default="经济型酒店"), preferences: str = Query(default=""), free_text_input: str = Query(default=""), current_user=Depends(get_optional_user), db: Session = Depends(get_db)):
+def stream_plan(http_request: Request, city: str = Query(...), start_date: str = Query(...), end_date: str = Query(...), travel_days: int = Query(..., ge=1, le=30), transportation: str = Query(default="公共交通"), accommodation: str = Query(default="经济型酒店"), preferences: str = Query(default=""), free_text_input: str = Query(default=""), search_mode: Literal["off", "auto", "on"] | None = Query(default=None), current_user=Depends(get_optional_user), db: Session = Depends(get_db)):
     request = TripRequest(
         city=city,
         start_date=start_date,
@@ -91,9 +104,11 @@ def stream_plan(http_request: Request, city: str = Query(...), start_date: str =
         transportation=transportation,
         accommodation=accommodation,
         preferences=[item for item in preferences.split(",") if item],
-        free_text_input=free_text_input
+        free_text_input=free_text_input,
+        search_mode=search_mode or get_settings().web_search_default_mode,
     )
     user_id = current_user.id if current_user else None
+    memory_context = build_user_memory_context(db, user_id) if user_id else ""
     client_key = http_request.client.host if http_request.client else "anonymous"
     run_id = uuid.uuid4().hex
 
@@ -112,9 +127,9 @@ def stream_plan(http_request: Request, city: str = Query(...), start_date: str =
             worker_db = SessionLocal()
             try:
                 events.put({"type": "step", "data": {"run_id": run_id, "name": "任务初始化", "status": "running", "summary": "开始生成旅行计划", "duration_ms": 0, "timestamp_ms": int(time.time() * 1000)}})
-                cached_plan = get_cached_plan(request, user_id)
+                cached_plan = get_cached_plan(request, user_id, memory_context)
                 if cached_plan:
-                    cached_plan = cached_plan.model_copy(update={"source": "cache", "is_fallback": False, "warnings": []})
+                    cached_plan = cached_plan.model_copy(update={"source": "cache", "is_fallback": False})
                     collect({"name": "AI结果缓存", "status": "success", "summary": "命中相同旅行需求缓存,直接返回历史生成结果", "duration_ms": 0})
                     record = create_trip_record(worker_db, cached_plan, request, user_id, source="cache") if user_id else None
                     duration_ms = int((time.time() - started_at) * 1000)
@@ -125,12 +140,21 @@ def stream_plan(http_request: Request, city: str = Query(...), start_date: str =
                 if not allowed:
                     events.put({"type": "error", "data": {"message": f"生成过于频繁,请{retry_after}秒后再试"}})
                     return
-                retrieval = run_agentic_retrieval(worker_db, request, progress=collect)
+                retrieval = run_agentic_retrieval(worker_db, request, progress=collect, memory_context=memory_context)
                 agent = get_trip_planner_agent()
-                trip_plan = agent.plan_trip(request, progress_callback=collect, knowledge_context=retrieval.context, run_id=run_id)
+                trip_plan = agent.plan_trip(
+                    request,
+                    progress_callback=collect,
+                    knowledge_context=retrieval.context,
+                    run_id=run_id,
+                    memory_context=memory_context,
+                )
                 trip_plan = trip_plan.model_copy(update={"knowledge_refs": retrieval.refs()})
+                gap_warning = knowledge_gap_warning(retrieval, request)
+                if gap_warning:
+                    trip_plan.warnings.append(gap_warning)
                 if not trip_plan.is_fallback:
-                    set_cached_plan(request, trip_plan, user_id)
+                    set_cached_plan(request, trip_plan, user_id, memory_context)
                 record = None
                 if user_id:
                     record = create_trip_record(worker_db, trip_plan, request, user_id)
@@ -159,7 +183,9 @@ def stream_plan(http_request: Request, city: str = Query(...), start_date: str =
 def optimize_trip(request: OptimizeRequest, current_user=Depends(get_optional_user), db: Session = Depends(get_db)):
     try:
         original_plan = TripPlan(**request.plan)
-        optimized = optimize_trip_plan(original_plan, request.instruction)
+        memory_context = build_user_memory_context(db, current_user.id) if current_user else ""
+        instruction = f"{request.instruction}\n{memory_context}" if memory_context else request.instruction
+        optimized = optimize_trip_plan(original_plan, instruction)
         # 计算优化前后的差异摘要,供前端预览变更
         diff = compute_plan_diff(original_plan, optimized)
         record = None

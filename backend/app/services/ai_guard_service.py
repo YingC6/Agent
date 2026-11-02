@@ -7,7 +7,7 @@ from ..models.schemas import TripPlan, TripRequest
 from .cache_service import cache_get, cache_set, rate_limit_check
 
 
-def build_plan_cache_key(request: TripRequest, user_id: int | None = None) -> str:
+def build_plan_cache_key(request: TripRequest, user_id: int | None = None, memory_context: str = "") -> str:
     payload = {
         "user_id": user_id,
         "city": request.city,
@@ -17,23 +17,26 @@ def build_plan_cache_key(request: TripRequest, user_id: int | None = None) -> st
         "transportation": request.transportation,
         "accommodation": request.accommodation,
         "preferences": sorted(request.preferences),
-        "free_text_input": request.free_text_input or ""
+        "free_text_input": request.free_text_input or "",
+        # 联网搜索开关与长期记忆都会影响结果,必须参与缓存键
+        "search_mode": request.search_mode,
+        "memory_context": memory_context,
     }
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
     return f"ai_plan:{digest}"
 
 
-def get_cached_plan(request: TripRequest, user_id: int | None = None) -> TripPlan | None:
-    cached = cache_get(build_plan_cache_key(request, user_id))
+def get_cached_plan(request: TripRequest, user_id: int | None = None, memory_context: str = "") -> TripPlan | None:
+    cached = cache_get(build_plan_cache_key(request, user_id, memory_context))
     if not cached:
         return None
     return TripPlan(**cached)
 
 
-def set_cached_plan(request: TripRequest, plan: TripPlan, user_id: int | None = None) -> None:
+def set_cached_plan(request: TripRequest, plan: TripPlan, user_id: int | None = None, memory_context: str = "") -> None:
     settings = get_settings()
-    cache_set(build_plan_cache_key(request, user_id), plan.model_dump(), settings.ai_plan_cache_ttl_seconds)
+    cache_set(build_plan_cache_key(request, user_id, memory_context), plan.model_dump(), settings.ai_plan_cache_ttl_seconds)
 
 
 def check_plan_rate_limit(user_id: int | None, client_key: str = "anonymous") -> tuple[bool, int]:

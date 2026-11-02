@@ -22,7 +22,7 @@ from loguru import logger
 from ...api.deps import get_current_user
 from ...database import get_db
 from ...models.db_models import UserMemory
-from ...services.memory_service import build_user_memory_context
+from ...services.memory_service import build_memory_key, build_user_memory_context, upsert_user_memory
 
 router = APIRouter(prefix="/preferences", tags=["偏好管理"])
 
@@ -56,7 +56,7 @@ def list_preferences(current_user=Depends(get_current_user), db: Session = Depen
     """查询当前用户的所有偏好记忆,按重要度和更新时间排序。"""
     stmt = (
         select(UserMemory)
-        .where(UserMemory.user_id == current_user.id)
+        .where(UserMemory.user_id == current_user.id, UserMemory.is_active.is_(True))
         .order_by(UserMemory.importance.desc(), UserMemory.updated_at.desc())
     )
     memories = list(db.scalars(stmt).all())
@@ -83,27 +83,12 @@ def create_preference(request: PreferenceCreateRequest, current_user=Depends(get
     prefix = {"preference": "偏好", "avoidance": "避开", "budget": "预算"}[request.memory_type]
     content = f"{prefix}：{request.content.strip()}"
 
-    exists = db.scalar(
-        select(UserMemory).where(
-            UserMemory.user_id == current_user.id,
-            UserMemory.memory_type == request.memory_type,
-            UserMemory.content == content,
-        )
-    )
-    if exists:
-        raise HTTPException(status_code=409, detail="该偏好已存在")
-
-    memory = UserMemory(
-        user_id=current_user.id,
-        memory_type=request.memory_type,
-        content=content,
-        importance=request.importance,
-    )
-    db.add(memory)
+    # 同主题旧偏好会被标记失效,新偏好生效,避免同类偏好越积越多
+    memory, created = upsert_user_memory(db, current_user.id, request.memory_type, content, request.importance)
     db.commit()
     db.refresh(memory)
-    logger.info("preference_created user_id={} type={} id={}", current_user.id, request.memory_type, memory.id)
-    return {"success": True, "message": "偏好已添加", "data": _memory_to_dict(memory)}
+    logger.info("preference_saved user_id={} type={} id={} created={}", current_user.id, request.memory_type, memory.id, created)
+    return {"success": True, "message": "偏好已添加" if created else "偏好已更新", "data": _memory_to_dict(memory)}
 
 
 @router.put("/{memory_id}")
@@ -116,6 +101,7 @@ def update_preference(memory_id: int, request: PreferenceUpdateRequest, current_
     if request.content is not None:
         prefix = {"preference": "偏好", "avoidance": "避开", "budget": "预算"}.get(memory.memory_type, "")
         memory.content = f"{prefix}：{request.content.strip()}" if prefix else request.content.strip()
+        memory.memory_key = build_memory_key(memory.memory_type, memory.content)
     if request.importance is not None:
         memory.importance = request.importance
     db.commit()

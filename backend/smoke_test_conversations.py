@@ -47,18 +47,15 @@ modified_plan.days[0].attractions = [new_attraction]
 
 conversations.optimize_trip_plan = lambda plan, instruction: modified_plan
 
-class _FakeAgent:
-    def __init__(self, *args, **kwargs):
-        pass
-
+class _FakeRuntime:
     def run(self, prompt):
         return "这是基于当前行程的回答。"
 
-    def stream_run(self, prompt):
+    def stream(self, prompt):
         yield "这是基于"
         yield "当前行程的回答。"
 
-conversations.SimpleAgent = _FakeAgent
+conversations.get_agent = lambda key, name, system_prompt: _FakeRuntime()
 conversations.get_amap_service = lambda: type("FakeAmap", (), {
     "_call": lambda self, name, args: {"forecast": [{"day_weather": "晴"}]},
     "search_poi_data": lambda self, k, c, citylimit=True: [{"poi_id": "B000A1", "name": "某餐厅"}],
